@@ -32,9 +32,8 @@ if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets
         json.dump(full_creds, f)
 
 def get_gmail_service():
-    # Diagnostic check to see if GMAIL_TOKEN exists in Streamlit Secrets
     if 'GMAIL_TOKEN' not in st.secrets:
-        st.error("Diagnostic Error: The [GMAIL_TOKEN] section is missing from your Streamlit Cloud Secrets! Please make sure you added it in your app settings.")
+        st.error("The [GMAIL_TOKEN] section is missing from your Streamlit Cloud Secrets.")
         return None
 
     creds = None
@@ -61,20 +60,20 @@ def get_gmail_service():
                 st.error(f"Token refresh failed: {e}")
                 return None
         else:
-            st.error("Credentials object is invalid or expired.")
+            st.error("Authentication token is invalid or expired.")
             return None
             
     return build('gmail', 'v1', credentials=creds)
 
 def analyze_email_with_gemini(subject, sender, snippet):
     if not GEMINI_API_KEY:
-        return "Error: Gemini API Key is missing in Streamlit Secrets."
+        return "Category: General\nSummary: Gemini API Key missing."
     
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"""
-    Analyze this email and categorize it into one of these buckets: 
-    [Urgent, Client Project, Security Alert, Spam, General]. 
-    Also provide a 1-sentence summary.
+    Analyze this email and strictly follow this output format:
+    Category: [Urgent, Client Project, Security Alert, Spam, General]
+    Summary: [1-sentence summary]
     
     Sender: {sender}
     Subject: {subject}
@@ -88,45 +87,102 @@ def analyze_email_with_gemini(subject, sender, snippet):
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent")
-st.markdown("Automated Inbox Categorization & Summary Dashboard powered by Gemini.")
+st.markdown("Automated Inbox Categorization, Cleanup & Summary Dashboard powered by Gemini.")
 
 col1, col2 = st.columns([1, 3])
 
 with col1:
     st.subheader("Controls")
-    max_emails = st.slider("Number of emails to scan", 1, 10, 5)
-    run_btn = st.button("🚀 Fetch & Analyze Inbox", type="primary")
+    max_emails = st.slider("Number of emails to scan", 1, 15, 5)
+    auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=False)
+    run_btn = st.button("🚀 Fetch, Sort & Clean Inbox", type="primary")
 
 with col2:
-    st.subheader("Live Analysis Feed")
+    st.subheader("Live Categorized Feed")
     if run_btn:
         if not GEMINI_API_KEY:
             st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
         else:
-            with st.spinner("Connecting to Gmail and running Gemini AI analysis..."):
+            with st.spinner("Connecting to Gmail, analyzing via Gemini, and sorting..."):
                 service = get_gmail_service()
                 if service:
                     results = service.users().messages().list(userId='me', q='label:unread', maxResults=max_emails).execute()
                     messages = results.get('messages', [])
 
                     if not messages:
-                        st.info("No unread messages found anywhere in your mailbox.")
+                        st.info("No unread messages found in your mailbox.")
                     else:
-                        st.success(f"Found {len(messages)} unread email(s).")
+                        st.success(f"Successfully processed {len(messages)} unread email(s).")
                         
+                        # Store analyzed emails by category
+                        categorized_bins = {
+                            "Urgent": [],
+                            "Client Project": [],
+                            "Security Alert": [],
+                            "General": [],
+                            "Spam": []
+                        }
+
                         for msg in messages:
-                            txt = service.users().messages().get(userId='me', id=msg['id']).execute()
+                            msg_id = msg['id']
+                            txt = service.users().messages().get(userId='me', id=msg_id).execute()
                             headers = txt['payload']['headers']
                             
                             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                             snippet = txt.get('snippet', '')
 
-                            ai_analysis = analyze_email_with_gemini(subject, sender, snippet)
+                            ai_response = analyze_email_with_gemini(subject, sender, snippet)
+                            
+                            # Parse Gemini category and summary
+                            category = "General"
+                            summary = ai_response
+                            for line in ai_response.split('\n'):
+                                if "Category:" in line:
+                                    clean_cat = line.replace("Category:", "").strip().replace("[", "").replace("]", "")
+                                    if clean_cat in categorized_bins:
+                                        category = clean_cat
+                                elif "Summary:" in line:
+                                    summary = line.replace("Summary:", "").strip()
 
-                            with st.container(border=True):
-                                st.markdown(f"**From:** {sender}")
-                                st.markdown(f"**Subject:** {subject}")
-                                st.markdown(f"**Snippet:** _{snippet}_")
-                                st.markdown("---")
-                                st.markdown(f"**AI Analysis & Sorting:**\n\n{ai_analysis}")
+                            email_data = {
+                                "id": msg_id,
+                                "sender": sender,
+                                "subject": subject,
+                                "snippet": snippet,
+                                "summary": summary
+                            }
+
+                            # Handle Spam Trashing if enabled
+                            if category == "Spam" and auto_trash_spam:
+                                try:
+                                    service.users().messages().trash(userId='me', id=msg_id).execute()
+                                    email_data["trashed"] = True
+                                except Exception:
+                                    email_data["trashed"] = False
+                            else:
+                                email_data["trashed"] = False
+
+                            categorized_bins[category].append(email_data)
+
+                        # Render Tabs for Clean Sorting
+                        tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🗑️ Spam"])
+                        
+                        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Spam"]
+                        for i, tab in enumerate(tabs):
+                            current_cat = bin_keys[i]
+                            items = categorized_bins[current_cat]
+                            
+                            with tab:
+                                if not items:
+                                    st.info(f"No emails in this category.")
+                                else:
+                                    for item in items:
+                                        with st.container(border=True):
+                                            st.markdown(f"**From:** {item['sender']}")
+                                            st.markdown(f"**Subject:** {item['subject']}")
+                                            st.markdown(f"**Snippet:** _{item['snippet']}_")
+                                            st.markdown("---")
+                                            st.markdown(f"**AI Summary:** {item['summary']}")
+                                            if item['trashed']:
+                                                st.error("🗑️ *Automatically moved to Trash (identified as Spam).*")
