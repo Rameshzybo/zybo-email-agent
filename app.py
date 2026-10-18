@@ -79,16 +79,16 @@ def analyze_email_with_gemini(subject, sender, snippet):
     Subject: {subject}
     Snippet: {snippet}
     """
-    # Using verified stable model endpoint
+    # Using the universal stable latest flash endpoint
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-flash-latest",
         contents=prompt,
     )
     return response.text
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent")
-st.markdown("Automated Inbox Categorization, Cleanup & Summary Dashboard powered by Gemini. (v2.5)")
+st.markdown("Automated Inbox Categorization, Cleanup & Summary Dashboard powered by Gemini.")
 
 col1, col2 = st.columns([1, 3])
 
