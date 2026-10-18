@@ -80,7 +80,7 @@ def analyze_email_with_gemini(subject, sender, snippet):
     Snippet: {snippet}
     """
     response = client.models.generate_content(
-        model="gemini-3.8-flash",
+        model="gemini-1.5-flash",  # Stable model version
         contents=prompt,
     )
     return response.text
@@ -114,7 +114,6 @@ with col2:
                     else:
                         st.success(f"Successfully processed {len(messages)} unread email(s).")
                         
-                        # Store analyzed emails by category
                         categorized_bins = {
                             "Urgent": [],
                             "Client Project": [],
@@ -134,7 +133,6 @@ with col2:
 
                             ai_response = analyze_email_with_gemini(subject, sender, snippet)
                             
-                            # Parse Gemini category and summary
                             category = "General"
                             summary = ai_response
                             for line in ai_response.split('\n'):
@@ -153,7 +151,6 @@ with col2:
                                 "summary": summary
                             }
 
-                            # Handle Spam Trashing if enabled
                             if category == "Spam" and auto_trash_spam:
                                 try:
                                     service.users().messages().trash(userId='me', id=msg_id).execute()
@@ -165,7 +162,6 @@ with col2:
 
                             categorized_bins[category].append(email_data)
 
-                        # Render Tabs for Clean Sorting
                         tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🗑️ Spam"])
                         
                         bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Spam"]
