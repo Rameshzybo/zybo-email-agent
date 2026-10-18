@@ -32,19 +32,23 @@ if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets
         json.dump(full_creds, f)
 
 def get_gmail_service():
+    # Diagnostic check to see if GMAIL_TOKEN exists in Streamlit Secrets
+    if 'GMAIL_TOKEN' not in st.secrets:
+        st.error("Diagnostic Error: The [GMAIL_TOKEN] section is missing from your Streamlit Cloud Secrets! Please make sure you added it in your app settings.")
+        return None
+
     creds = None
     try:
-        if 'GMAIL_TOKEN' in st.secrets:
-            token_secret = st.secrets['GMAIL_TOKEN']
-            token_info = {
-                "token": token_secret.get("token"),
-                "refresh_token": token_secret.get("refresh_token"),
-                "token_uri": token_secret.get("token_uri", "https://oauth2.googleapis.com/token"),
-                "client_id": token_secret.get("client_id"),
-                "client_secret": token_secret.get("client_secret"),
-                "scopes": list(token_secret.get("scopes", SCOPES)),
-            }
-            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        token_secret = st.secrets['GMAIL_TOKEN']
+        token_info = {
+            "token": token_secret.get("token"),
+            "refresh_token": token_secret.get("refresh_token"),
+            "token_uri": token_secret.get("token_uri", "https://oauth2.googleapis.com/token"),
+            "client_id": token_secret.get("client_id"),
+            "client_secret": token_secret.get("client_secret"),
+            "scopes": list(token_secret.get("scopes", SCOPES)),
+        }
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
     except Exception as e:
         st.error(f"Error reading token secrets: {e}")
         return None
@@ -57,7 +61,7 @@ def get_gmail_service():
                 st.error(f"Token refresh failed: {e}")
                 return None
         else:
-            st.error("Authentication token is missing or invalid. Please check your Streamlit Secrets configuration.")
+            st.error("Credentials object is invalid or expired.")
             return None
             
     return build('gmail', 'v1', credentials=creds)
