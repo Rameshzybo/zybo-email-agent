@@ -61,7 +61,6 @@ def get_gmail_service():
     creds = None
     try:
         token_secret = st.secrets['GMAIL_TOKEN']
-        # Use scopes stored in token secret if available, otherwise default to SCOPES
         saved_scopes = list(token_secret.get("scopes", SCOPES))
         
         token_info = {
@@ -98,6 +97,31 @@ def get_calendar_service():
         except Exception:
             return None
     return None
+
+# --- Security & Phishing Inspection ---
+def inspect_security_and_links(subject, sender, snippet, payload):
+    warnings = []
+    combined = f"{subject} {snippet}".lower()
+
+    # 1. Detect Suspicious File Extensions
+    dangerous_exts = ['.exe', '.scr', '.vbs', '.js', '.bat', '.cmd', '.msi', '.ps1', '.zip']
+    parts = payload.get('parts', [])
+    for p in parts:
+        fname = p.get('filename', '').lower()
+        if any(fname.endswith(ext) for ext in dangerous_exts):
+            warnings.append(f"⚠️ Potentially dangerous attachment detected: `{fname}`")
+
+    # 2. Phishing & Suspicious Link Patterns
+    if any(k in combined for k in ["verify your account", "login urgently", "password expired", "click here immediately", "bank transfer", "wire funds"]):
+        warnings.append("⚠️ Phishing indicator: Urgent credential or financial action requested.")
+
+    # 3. Mismatched domain or raw IP URL patterns
+    urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', combined)
+    for url in urls:
+        if re.search(r'https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', url):
+            warnings.append(f"⚠️ Suspicious IP-based URL detected: `{url}`")
+
+    return warnings
 
 # --- Attachment Handling ---
 def parse_attachment_content(service, msg_id, part):
@@ -166,11 +190,15 @@ def detect_meeting_details(subject, snippet):
         }
     return {"is_meeting": False, "title": "", "suggested_time": ""}
 
-# --- Smart Local Rule Classifier with Custom Rules ---
-def classify_email_locally(subject, sender, snippet, headers, label_ids):
+# --- Smart Local Rule Classifier with Custom Rules & Whitelist Support ---
+def classify_email_locally(subject, sender, snippet, headers, label_ids, whitelist_str):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
     send_lower = sender.lower()
+
+    # Check Whitelist Protection
+    whitelisted_domains = [d.strip().lower() for d in whitelist_str.split(",") if d.strip()]
+    is_whitelisted = any(domain in send_lower for domain in whitelisted_domains)
 
     if 'SPAM' in label_ids:
         return {
@@ -181,7 +209,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": f"Spam message from {sender}",
             "suggested_reply": "N/A",
             "unsubscribe": "",
-            "is_enquiry": False
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
         }
 
     unsubscribe_link = ""
@@ -200,7 +229,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": f"Client enquiry from {sender}: {snippet[:100]}...",
             "suggested_reply": f"Hello,\n\nThank you for reaching out to ZYBO Tech Lab regarding your enquiry. Ramesh R. and our project team have received your request and will provide a formal response shortly.\n\nBest regards,\nRamesh R.\nProject Head | ZYBO Tech Lab",
             "unsubscribe": unsubscribe_link,
-            "is_enquiry": True
+            "is_enquiry": True,
+            "is_whitelisted": is_whitelisted
         }
 
     # 1. Security Alerts
@@ -213,7 +243,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": f"Security warning regarding website activity from {sender}.",
             "suggested_reply": "Thank you. The technical team will review this security alert.",
             "unsubscribe": unsubscribe_link,
-            "is_enquiry": False
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
         }
 
     # 2. Spam & Comment Moderation
@@ -226,7 +257,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": "WordPress comment moderation request.",
             "suggested_reply": "Automated notification processed.",
             "unsubscribe": unsubscribe_link,
-            "is_enquiry": False
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
         }
 
     # 3. Promotional, Newsletters & Digests
@@ -239,7 +271,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": f"Promotional publication or digest: {subject}",
             "suggested_reply": "Offers noted.",
             "unsubscribe": unsubscribe_link,
-            "is_enquiry": False
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
         }
 
     # 4. Client Projects
@@ -252,7 +285,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "summary": f"Client project communication: {snippet[:100]}...",
             "suggested_reply": "Hello,\n\nThank you for your update. Ramesh R. and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nRamesh R.\nProject Head | ZYBO Tech Lab",
             "unsubscribe": unsubscribe_link,
-            "is_enquiry": False
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
         }
 
     # Default General
@@ -264,7 +298,8 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
         "summary": snippet[:150] if snippet else "No summary available.",
         "suggested_reply": "Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your message and will respond shortly.\n\nBest regards,\nRamesh R.\nProject Head | ZYBO Tech Lab",
         "unsubscribe": unsubscribe_link,
-        "is_enquiry": False
+        "is_enquiry": False,
+        "is_whitelisted": is_whitelisted
     }
 
 # --- AI Text Generator ---
@@ -293,13 +328,19 @@ Best regards,
 Ramesh R.
 Project Head | ZYBO Tech Lab"""
 
-# Initialize session state for persistent results
+# Initialize Session State
 if "analyzed_emails" not in st.session_state:
     st.session_state.analyzed_emails = []
 
+if "cleanup_history" not in st.session_state:
+    st.session_state.cleanup_history = []
+
+if "bulk_selected_ids" not in st.session_state:
+    st.session_state.bulk_selected_ids = []
+
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent Dashboard")
-st.markdown("Automated Mail Categorization, Thread Summarization, Multilingual Communication, Task Extraction, Meeting Scheduling & Automation.")
+st.markdown("Automated Mail Categorization, Phishing & Spam Cleanup, Whitelisted Contacts, Task Extraction & Action History.")
 
 # Sidebar Controls
 with st.sidebar:
@@ -307,6 +348,10 @@ with st.sidebar:
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
     max_scan_limit = st.slider("Max emails to scan", 10, 500, 100)
     
+    st.markdown("---")
+    st.markdown("### 🛡️ Whitelist & Exclusion Contacts")
+    whitelist_domains = st.text_area("Protected Senders/Domains (Comma separated):", "zybo.in, google.com, hostinger.com")
+
     st.markdown("---")
     st.markdown("### ⚙️ Custom Automation Rules")
     enquiry_auto_tag = st.checkbox("🏷️ Auto-assign 'Client Enquiry' label", value=True)
@@ -356,6 +401,13 @@ with st.sidebar:
                             draft_body = {'message': {'raw': raw}}
                             service.users().drafts().create(userId='me', body=draft_body).execute()
                             st.success("Draft saved to Gmail successfully!")
+                            
+                            # Audit log
+                            st.session_state.cleanup_history.append({
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "action": "Saved Draft",
+                                "target": comp_to
+                            })
                             st.session_state.composed_text = ""
                         except Exception as err:
                             st.error(f"Failed to save draft: {err}")
@@ -404,15 +456,17 @@ if run_btn:
                     try:
                         txt = service.users().messages().get(userId='me', id=msg_id).execute()
                         thread_id = txt.get('threadId')
-                        headers = txt.get('payload', {}).get('headers', [])
+                        payload = txt.get('payload', {})
+                        headers = payload.get('headers', [])
                         label_ids = txt.get('labelIds', [])
                         
                         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                         sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                         snippet = txt.get('snippet', '')
 
-                        classification = classify_email_locally(subject, sender, snippet, headers, label_ids)
-                        
+                        classification = classify_email_locally(subject, sender, snippet, headers, label_ids, whitelist_domains)
+                        security_warnings = inspect_security_and_links(subject, sender, snippet, payload)
+
                         category = classification["category"]
                         tasks, deadlines = extract_tasks_and_deadlines(subject, snippet)
                         meeting_info = detect_meeting_details(subject, snippet)
@@ -433,6 +487,8 @@ if run_btn:
                             "suggested_reply": classification["suggested_reply"],
                             "unsubscribe": classification.get("unsubscribe", ""),
                             "is_enquiry": classification.get("is_enquiry", False),
+                            "is_whitelisted": classification.get("is_whitelisted", False),
+                            "security_warnings": security_warnings,
                             "tasks": tasks,
                             "deadlines": deadlines,
                             "meeting": meeting_info,
@@ -442,11 +498,17 @@ if run_btn:
                             "trashed": False
                         }
 
+                        # Protect Whitelisted senders from auto-trashing
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                        if should_trash and not require_confirmation:
+                        if should_trash and not require_confirmation and not email_data["is_whitelisted"]:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
+                                st.session_state.cleanup_history.append({
+                                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "Auto-Trashed",
+                                    "target": f"{subject} ({sender})"
+                                })
                                 time.sleep(0.3)
                             except Exception:
                                 pass
@@ -486,7 +548,8 @@ if scan_spam_btn:
                         try:
                             txt = service.users().messages().get(userId='me', id=msg_id).execute()
                             thread_id = txt.get('threadId')
-                            headers = txt.get('payload', {}).get('headers', [])
+                            payload = txt.get('payload', {})
+                            headers = payload.get('headers', [])
                             label_ids = txt.get('labelIds', [])
                             
                             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
@@ -507,6 +570,8 @@ if scan_spam_btn:
                                 "suggested_reply": "N/A",
                                 "unsubscribe": "",
                                 "is_enquiry": False,
+                                "is_whitelisted": False,
+                                "security_warnings": [],
                                 "tasks": [],
                                 "deadlines": [],
                                 "meeting": {"is_meeting": False},
@@ -558,6 +623,33 @@ if st.session_state.analyzed_emails:
             for t_item in task_items[:3]:
                 st.caption(f"• {t_item['subject'][:40]}...")
 
+    # Action History & Bulk Options Bar
+    with st.expander("📜 Cleanup History & Bulk Preview Actions", expanded=False):
+        col_h1, col_h2 = st.columns([2, 1])
+        with col_h1:
+            st.markdown("### Action History Log")
+            if st.session_state.cleanup_history:
+                for entry in list(reversed(st.session_state.cleanup_history))[:10]:
+                    st.text(f"[{entry['time']}] {entry['action']}: {entry['target']}")
+            else:
+                st.caption("No cleanup actions recorded in this session.")
+        with col_h2:
+            st.markdown("### Bulk Actions")
+            if st.button("🗑️ Trash Selected Preview Emails"):
+                service = get_gmail_service()
+                if service and st.session_state.bulk_selected_ids:
+                    count = 0
+                    for m_id in st.session_state.bulk_selected_ids:
+                        try:
+                            service.users().messages().trash(userId='me', id=m_id).execute()
+                            count += 1
+                        except Exception:
+                            pass
+                    st.success(f"Trashed {count} selected emails!")
+                    st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] not in st.session_state.bulk_selected_ids]
+                    st.session_state.bulk_selected_ids = []
+                    st.rerun()
+
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.metric("Total Scanned", len(emails))
@@ -586,19 +678,37 @@ if st.session_state.analyzed_emails:
             else:
                 for item in items:
                     with st.container(border=True):
-                        c1, c2 = st.columns([3, 1])
+                        c1, c2, c3 = st.columns([0.2, 2.8, 1])
+                        
                         with c1:
+                            # Bulk select checkbox
+                            is_selected = st.checkbox("", key=f"chk_{item['id']}")
+                            if is_selected and item['id'] not in st.session_state.bulk_selected_ids:
+                                st.session_state.bulk_selected_ids.append(item['id'])
+                            elif not is_selected and item['id'] in st.session_state.bulk_selected_ids:
+                                st.session_state.bulk_selected_ids.remove(item['id'])
+
+                        with c2:
                             st.markdown(f"**From:** {item['sender']}")
                             st.markdown(f"**Subject:** {item['subject']}")
                             if item.get("is_enquiry", False):
                                 st.markdown("🏷️ `Client Enquiry`")
-                        with c2:
+                            if item.get("is_whitelisted", False):
+                                st.markdown("🛡️ `Whitelisted Contact (Protected)`")
+
+                        with c3:
                             prio_color = "red" if item['priority'] == 'High' else ("orange" if item['priority'] == 'Medium' else "green")
                             st.markdown(f"**Priority:** :{prio_color}[{item['priority']}]")
                             st.markdown(f"**Action:** `{item['action_required']}`")
                         
                         st.markdown(f"**AI Summary:** {item['summary']}")
                         st.caption(f"Reason: {item['reason']}")
+
+                        # Security and Phishing Warning Box
+                        if item.get("security_warnings"):
+                            st.markdown("---")
+                            for warn in item["security_warnings"]:
+                                st.error(warn)
 
                         # Task & Deadline Extraction Display
                         if item['tasks'] or item['deadlines']:
@@ -629,7 +739,7 @@ if st.session_state.analyzed_emails:
                                         cal_service.events().insert(calendarId='primary', body=event).execute()
                                         st.success("Meeting event added to Google Calendar!")
                                     except Exception as cal_err:
-                                        st.error(f"Calendar error (Ensure calendar.events scope is granted): {cal_err}")
+                                        st.error(f"Calendar error: {cal_err}")
 
                         if item['trashed']:
                             st.error("🗑️ *Moved to Trash (Synced with Gmail).*")
@@ -660,12 +770,22 @@ if st.session_state.analyzed_emails:
                             if st.button("📥 Archive", key=f"arch_{item['id']}"):
                                 if service:
                                     service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
+                                    st.session_state.cleanup_history.append({
+                                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "action": "Archived",
+                                        "target": f"{item['subject']}"
+                                    })
                                     st.success("Archived!")
 
                         with btn_col4:
                             unsub_link = item.get('unsubscribe', '')
                             if unsub_link:
                                 if st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}"):
+                                    st.session_state.cleanup_history.append({
+                                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "action": "Unsubscribed",
+                                        "target": f"{item['sender']}"
+                                    })
                                     st.markdown(f"[Click here to Unsubscribe]({unsub_link})", unsafe_allow_html=True)
                             else:
                                 st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}", disabled=True)
@@ -676,6 +796,11 @@ if st.session_state.analyzed_emails:
                                     try:
                                         service.users().messages().trash(userId='me', id=item['id']).execute()
                                         item['trashed'] = True
+                                        st.session_state.cleanup_history.append({
+                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "action": "Trashed",
+                                            "target": f"{item['subject']}"
+                                        })
                                         st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] != item['id']]
                                         st.success("Deleted from Gmail successfully!")
                                         st.rerun()
@@ -741,6 +866,11 @@ if st.session_state.analyzed_emails:
                                             }
                                         }
                                         service.users().drafts().create(userId='me', body=draft_body).execute()
+                                        st.session_state.cleanup_history.append({
+                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "action": "Saved Reply Draft",
+                                            "target": f"{item['subject']}"
+                                        })
                                         st.success("Successfully saved as an in-thread draft in your Gmail account!")
                                     except Exception as err:
                                         st.error(f"Failed to create draft: {err}")
