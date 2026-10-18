@@ -10,6 +10,7 @@ import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google import genai
 
 # Safe Optional Attachment Parsers
@@ -132,12 +133,25 @@ def get_calendar_service():
             return None
     return None
 
+# --- Rate-Limit Resilient API Executor ---
+def execute_with_backoff(request, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return request.execute()
+        except HttpError as err:
+            if err.resp.status in [403, 429] and "rateLimitExceeded" in str(err):
+                if attempt < max_retries - 1:
+                    sleep_time = (2 ** attempt) + 1
+                    time.sleep(sleep_time)
+                    continue
+            raise err
+    return request.execute()
+
 # --- Security, Phishing & Prompt Injection Protection ---
 def inspect_security_and_links(subject, sender, snippet, payload):
     warnings = []
     combined = f"{subject} {snippet}".lower()
 
-    # Dangerous extensions
     dangerous_exts = ['.exe', '.scr', '.vbs', '.js', '.bat', '.cmd', '.msi', '.ps1', '.zip', '.iso']
     parts = payload.get('parts', [])
     for p in parts:
@@ -145,7 +159,6 @@ def inspect_security_and_links(subject, sender, snippet, payload):
         if any(fname.endswith(ext) for ext in dangerous_exts):
             warnings.append(f"⚠️ Potentially dangerous executable attachment detected: `{fname}`")
 
-    # Indirect Prompt Injection Defense & Phishing Detection
     if any(k in combined for k in ["ignore previous instructions", "system prompt", "verify account details", "login urgently", "password expired", "click link below", "wire transfer"]):
         warnings.append("⚠️ Security Alert: Suspicious action request or potential prompt injection attempt in email body.")
 
@@ -164,46 +177,6 @@ def is_duplicate_action(action_key):
     st.session_state.processed_action_hashes.add(action_hash)
     return False
 
-# --- Attachment Handling ---
-def parse_attachment_content(service, msg_id, part):
-    filename = part.get('filename', '')
-    mime_type = part.get('mimeType', '')
-    body = part.get('body', {})
-    attachment_id = body.get('attachmentId')
-
-    if not attachment_id:
-        return filename, "No payload data"
-
-    try:
-        attachment = service.users().messages().attachments().get(
-            userId='me', messageId=msg_id, id=attachment_id
-        ).execute()
-        file_data = base64.urlsafe_b64decode(attachment['data'])
-
-        if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
-            reader = pypdf.PdfReader(io.BytesIO(file_data))
-            text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-            return filename, f"[PDF Text Summary]: {text[:300]}..."
-
-        elif ('word' in mime_type or filename.endswith('.docx')) and docx:
-            doc = docx.Document(io.BytesIO(file_data))
-            text = "\n".join([p.text for p in doc.paragraphs if p.text])
-            return filename, f"[Word Doc Text]: {text[:300]}..."
-
-        elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
-            wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
-            sheet = wb.active
-            rows = []
-            for row in sheet.iter_rows(values_only=True):
-                filtered_row = [str(cell) for cell in row if cell is not None]
-                if filtered_row:
-                    rows.append(" | ".join(filtered_row))
-            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5])}"
-
-        return filename, f"[Attached File]: {filename}"
-    except Exception as e:
-        return filename, f"Attachment parse error"
-
 # --- Invoice & Relationship Intelligence ---
 def process_invoice_data(subject, snippet):
     combined = f"{subject} {snippet}".lower()
@@ -220,9 +193,13 @@ def process_invoice_data(subject, snippet):
 
 def classify_relationship_and_lead(sender, subject, snippet):
     combined = f"{subject} {snippet}".lower()
+    send_lower = sender.lower()
     
+    if any(s in send_lower for s in ["instagram", "facebook", "linkedin", "twitter", "pinterest"]):
+        return "Social Notification", None
+
     rel_type = "Vendor / Service"
-    if "zybo" in sender.lower() or "employee" in combined:
+    if "zybo" in send_lower or "employee" in combined:
         rel_type = "Team Member"
     elif any(k in combined for k in ["enquiry", "quote", "proposal", "requirement", "pricing", "cost"]):
         rel_type = "Prospective Lead"
@@ -267,7 +244,7 @@ def detect_meeting_details(subject, snippet):
         }
     return {"is_meeting": False, "title": "", "suggested_time": ""}
 
-# --- Smart Local Classifier ---
+# --- Smart Local Rule Classifier ---
 def classify_email_locally(subject, sender, snippet, headers, label_ids, whitelist_str):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
@@ -294,6 +271,21 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids, whiteli
         if h['name'].lower() == 'list-unsubscribe':
             unsubscribe_link = h['value'].strip('<>')
 
+    # Social Media & Promotional Filtering
+    if any(s in send_lower for s in ["instagram", "facebook", "twitter", "linkedin", "pinterest", "tiktok", "mail.instagram.com"]):
+        return {
+            "category": "Promotional",
+            "priority": "Low",
+            "reason": "Social media notification.",
+            "action_required": "None",
+            "summary": snippet[:150],
+            "suggested_reply": "N/A",
+            "unsubscribe": unsubscribe_link,
+            "is_enquiry": False,
+            "is_whitelisted": is_whitelisted
+        }
+
+    # Client Enquiry Detection
     is_enquiry = any(k in sub_lower or k in snip_lower for k in ["enquiry", "inquiry", "quote", "pricing", "proposal", "requirement", "cost", "hire"])
     if is_enquiry:
         return {
@@ -308,6 +300,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids, whiteli
             "is_whitelisted": is_whitelisted
         }
 
+    # Security Alerts
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower or "vulnerability" in sub_lower:
         return {
             "category": "Security Alert",
@@ -321,19 +314,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids, whiteli
             "is_whitelisted": is_whitelisted
         }
 
-    if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
-        return {
-            "category": "Spam",
-            "priority": "Low",
-            "reason": "Unsolicited WordPress comment moderation notification.",
-            "action_required": "None",
-            "summary": "WordPress comment moderation request.",
-            "suggested_reply": "Automated notification processed.",
-            "unsubscribe": unsubscribe_link,
-            "is_enquiry": False,
-            "is_whitelisted": is_whitelisted
-        }
-
+    # Marketing Digests
     if "e27" in send_lower or "reddit" in send_lower or "digest" in sub_lower or "newsletter" in sub_lower or "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "promo" in sub_lower or "weekly" in sub_lower:
         return {
             "category": "Promotional",
@@ -347,6 +328,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids, whiteli
             "is_whitelisted": is_whitelisted
         }
 
+    # Client Projects
     if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower or "client" in sub_lower:
         return {
             "category": "Client Project",
@@ -493,7 +475,8 @@ with st.sidebar:
                                 raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
                                 
                                 draft_body = {'message': {'raw': raw}}
-                                service.users().drafts().create(userId='me', body=draft_body).execute()
+                                req = service.users().drafts().create(userId='me', body=draft_body)
+                                execute_with_backoff(req)
                                 st.success("Draft saved to Gmail successfully!")
                                 st.session_state.drafts_saved_count += 1
                                 st.session_state.cleanup_history.append({
@@ -509,7 +492,7 @@ with st.sidebar:
                 else:
                     st.warning("Please provide a recipient email.")
 
-# Execute regular scan
+# Execute regular scan with Rate-Limit Handling
 if run_btn:
     with st.spinner(f"Scanning up to {max_scan_limit} active emails for {account_selector}..."):
         service = get_gmail_service()
@@ -522,13 +505,14 @@ if run_btn:
             try:
                 while len(messages) < max_scan_limit:
                     fetch_size = min(50, max_scan_limit - len(messages))
-                    results = service.users().messages().list(
+                    list_req = service.users().messages().list(
                         userId='me', 
                         q=q_query, 
                         includeSpamTrash=False, 
                         maxResults=fetch_size,
                         pageToken=page_token
-                    ).execute()
+                    )
+                    results = execute_with_backoff(list_req)
                     
                     batch = results.get('messages', [])
                     if not batch:
@@ -538,8 +522,11 @@ if run_btn:
                     page_token = results.get('nextPageToken')
                     if not page_token:
                         break
-            except Exception as e:
-                st.error(f"API Scan Error: {e}")
+            except HttpError as err:
+                if "rateLimitExceeded" in str(err):
+                    st.warning("⚠️ Gmail API Rate Limit Reached. Please wait ~1 minute before fetching again.")
+                else:
+                    st.error(f"API Scan Error: {err}")
 
             if not messages:
                 st.info("No matching messages found in your account.")
@@ -549,7 +536,10 @@ if run_btn:
                 for idx, msg in enumerate(messages):
                     msg_id = msg['id']
                     try:
-                        txt = service.users().messages().get(userId='me', id=msg_id).execute()
+                        time.sleep(0.12)  # Micro-pause to prevent per-minute rate limits
+                        get_req = service.users().messages().get(userId='me', id=msg_id)
+                        txt = execute_with_backoff(get_req)
+                        
                         thread_id = txt.get('threadId')
                         payload = txt.get('payload', {})
                         headers = payload.get('headers', [])
@@ -598,21 +588,89 @@ if run_btn:
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                         if should_trash and not require_confirmation and not email_data["is_whitelisted"]:
                             try:
-                                service.users().messages().trash(userId='me', id=msg_id).execute()
+                                trash_req = service.users().messages().trash(userId='me', id=msg_id)
+                                execute_with_backoff(trash_req)
                                 email_data["trashed"] = True
-                                time.sleep(0.3)
                             except Exception:
                                 pass
 
                         processed_items.append(email_data)
-                        if idx > 0 and idx % 20 == 0:
-                            time.sleep(0.2)
-                            
                     except Exception:
                         continue
 
                 st.session_state.analyzed_emails = processed_items
                 st.success(f"Successfully processed {len(processed_items)} emails for {account_selector}!")
+
+# Execute standalone spam scan
+if scan_spam_btn:
+    with st.spinner("Scanning Spam folder separately..."):
+        service = get_gmail_service()
+        if service:
+            try:
+                list_req = service.users().messages().list(
+                    userId='me', 
+                    q='in:spam', 
+                    includeSpamTrash=True, 
+                    maxResults=100
+                )
+                results = execute_with_backoff(list_req)
+                
+                messages = results.get('messages', [])
+                if not messages:
+                    st.info("No spam messages found.")
+                    st.session_state.analyzed_emails = []
+                else:
+                    processed_items = []
+                    for msg in messages:
+                        msg_id = msg['id']
+                        try:
+                            time.sleep(0.1)
+                            get_req = service.users().messages().get(userId='me', id=msg_id)
+                            txt = execute_with_backoff(get_req)
+                            
+                            thread_id = txt.get('threadId')
+                            payload = txt.get('payload', {})
+                            headers = payload.get('headers', [])
+                            label_ids = txt.get('labelIds', [])
+                            
+                            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                            snippet = txt.get('snippet', '')
+
+                            email_data = {
+                                "id": msg_id,
+                                "threadId": thread_id,
+                                "sender": sender,
+                                "subject": subject,
+                                "snippet": snippet,
+                                "category": "Spam",
+                                "priority": "Low",
+                                "reason": "Retrieved from Spam folder scan.",
+                                "action_required": "None",
+                                "summary": snippet[:150],
+                                "suggested_reply": "N/A",
+                                "unsubscribe": "",
+                                "relationship": "Vendor / Service",
+                                "lead_details": None,
+                                "invoice_data": {"is_invoice": False},
+                                "tasks": [],
+                                "deadlines": [],
+                                "meeting": {"is_meeting": False},
+                                "is_enquiry": False,
+                                "is_whitelisted": False,
+                                "security_warnings": [],
+                                "is_starred": 'STARRED' in label_ids,
+                                "is_unread": 'UNREAD' in label_ids,
+                                "trashed": False
+                            }
+                            processed_items.append(email_data)
+                        except Exception:
+                            continue
+
+                    st.session_state.analyzed_emails = processed_items
+                    st.success(f"Successfully scanned {len(processed_items)} spam messages!")
+            except Exception as err:
+                st.error(f"Error scanning spam folder: {err}")
 
 # Main Navigation Tabs
 main_tabs = st.tabs([
@@ -623,7 +681,7 @@ main_tabs = st.tabs([
     "📥 Active Inbox Feed"
 ])
 
-# --- Tab 1: Conversational Email Assistant (Fixed Prompt Response Handling) ---
+# --- Tab 1: Conversational Email Assistant ---
 with main_tabs[0]:
     st.subheader("💬 Conversational Email Assistant")
     st.markdown("Ask natural language questions about your scanned inbox or chat with your email assistant.")
@@ -632,7 +690,6 @@ with main_tabs[0]:
     if st.button("🔍 Query Assistant", type="primary"):
         if user_query:
             q_clean = user_query.strip().lower()
-            # Handle conversational greetings naturally without template dumps
             if q_clean in ["hi", "hello", "hey", "greetings"]:
                 st.info("👋 Hello! I am your ZYBO AI Email Assistant. How can I help you manage your inbox, review project updates, or check deadlines today?")
             elif st.session_state.analyzed_emails:
@@ -698,7 +755,7 @@ with main_tabs[3]:
     else:
         st.info("Run a scan from the sidebar to view invoices.")
 
-# --- Tab 5: Active Inbox Feed (Restored Full Control Suite) ---
+# --- Tab 5: Active Inbox Feed ---
 with main_tabs[4]:
     if st.session_state.analyzed_emails:
         feed_tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
@@ -775,7 +832,8 @@ with main_tabs[4]:
                                                 'start': {'dateTime': start_time},
                                                 'end': {'dateTime': end_time},
                                             }
-                                            cal_service.events().insert(calendarId='primary', body=event).execute()
+                                            req = cal_service.events().insert(calendarId='primary', body=event)
+                                            execute_with_backoff(req)
                                             st.success("Meeting event added to Google Calendar!")
                                         except Exception as cal_err:
                                             st.error(f"Calendar error: {cal_err}")
@@ -791,30 +849,42 @@ with main_tabs[4]:
                                 star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
                                 if st.button(star_label, key=f"star_{item['id']}"):
                                     if service:
-                                        body = {'removeLabelIds': ['STARRED']} if item.get('is_starred', False) else {'addLabelIds': ['STARRED']}
-                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                        item['is_starred'] = not item.get('is_starred', False)
-                                        st.rerun()
+                                        try:
+                                            body = {'removeLabelIds': ['STARRED']} if item.get('is_starred', False) else {'addLabelIds': ['STARRED']}
+                                            req = service.users().messages().modify(userId='me', id=item['id'], body=body)
+                                            execute_with_backoff(req)
+                                            item['is_starred'] = not item.get('is_starred', False)
+                                            st.rerun()
+                                        except Exception as err:
+                                            st.error(f"Permission Error: Detail: {err}")
 
                             with btn_col2:
                                 read_label = "✉️ Unread" if not item.get('is_unread', False) else "📩 Read"
                                 if st.button(read_label, key=f"read_{item['id']}"):
                                     if service:
-                                        body = {'addLabelIds': ['UNREAD']} if not item.get('is_unread', False) else {'removeLabelIds': ['UNREAD']}
-                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                        item['is_unread'] = not item.get('is_unread', False)
-                                        st.rerun()
+                                        try:
+                                            body = {'addLabelIds': ['UNREAD']} if not item.get('is_unread', False) else {'removeLabelIds': ['UNREAD']}
+                                            req = service.users().messages().modify(userId='me', id=item['id'], body=body)
+                                            execute_with_backoff(req)
+                                            item['is_unread'] = not item.get('is_unread', False)
+                                            st.rerun()
+                                        except Exception as err:
+                                            st.error(f"Permission Error: Detail: {err}")
 
                             with btn_col3:
                                 if st.button("📥 Archive", key=f"arch_{item['id']}"):
                                     if service:
-                                        service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
-                                        st.session_state.cleanup_history.append({
-                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            "action": "Archived",
-                                            "target": f"{item['subject']}"
-                                        })
-                                        st.success("Archived!")
+                                        try:
+                                            req = service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']})
+                                            execute_with_backoff(req)
+                                            st.session_state.cleanup_history.append({
+                                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                "action": "Archived",
+                                                "target": f"{item['subject']}"
+                                            })
+                                            st.success("Archived!")
+                                        except Exception as err:
+                                            st.error(f"Permission Error: Detail: {err}")
 
                             with btn_col4:
                                 unsub_link = item.get('unsubscribe', '')
@@ -833,7 +903,8 @@ with main_tabs[4]:
                                 if st.button("🗑️ Delete", key=f"del_{item['id']}"):
                                     if service:
                                         try:
-                                            service.users().messages().trash(userId='me', id=item['id']).execute()
+                                            req = service.users().messages().trash(userId='me', id=item['id'])
+                                            execute_with_backoff(req)
                                             item['trashed'] = True
                                             st.session_state.cleanup_history.append({
                                                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -906,7 +977,8 @@ with main_tabs[4]:
                                                         'raw': raw
                                                     }
                                                 }
-                                                service.users().drafts().create(userId='me', body=draft_body).execute()
+                                                req = service.users().drafts().create(userId='me', body=draft_body)
+                                                execute_with_backoff(req)
                                                 st.session_state.drafts_saved_count += 1
                                                 st.session_state.cleanup_history.append({
                                                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
