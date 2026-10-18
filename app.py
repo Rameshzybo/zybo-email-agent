@@ -433,6 +433,54 @@ with st.sidebar:
     run_btn = st.button("🚀 Fetch, Analyze & Organize Mail", type="primary")
     scan_spam_btn = st.button("🚀 Scan Spam Separately", type="secondary")
 
+    st.markdown("---")
+    st.markdown("### ✍️ AI Email Composer")
+    with st.expander("✨ Compose New Email", expanded=False):
+        comp_to = st.text_input("Recipient Email:", key="comp_to")
+        comp_subject = st.text_input("Subject:", key="comp_sub")
+        comp_instructions = st.text_area("Instructions / Key Points:", key="comp_inst")
+        comp_tone = st.selectbox("Tone:", ["Professional", "Friendly", "Formal", "Concise", "Customized"], key="comp_tone")
+        
+        if "composed_text" not in st.session_state:
+            st.session_state.composed_text = ""
+
+        if st.button("🤖 Generate Draft Content"):
+            if comp_instructions:
+                comp_prompt = f"Compose a complete email body in a {comp_tone} tone based on these instructions: {comp_instructions}. Recipient: {comp_to}, Subject: {comp_subject}."
+                st.session_state.composed_text = generate_ai_text(comp_prompt)
+                st.session_state.ai_replies_generated_count += 1
+            else:
+                st.warning("Please enter instructions before generating.")
+
+        if st.session_state.composed_text:
+            edited_email = st.text_area("Review & Edit Draft Content:", value=st.session_state.composed_text, height=200, key="edited_comp")
+            
+            if st.button("📥 Save Draft to Gmail"):
+                if comp_to:
+                    service = get_gmail_service()
+                    if service:
+                        try:
+                            from email.mime.text import MIMEText
+                            msg = MIMEText(edited_email)
+                            msg['Subject'] = comp_subject or "New Message from ZYBO Tech Lab"
+                            msg['To'] = comp_to
+                            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+                            
+                            draft_body = {'message': {'raw': raw}}
+                            service.users().drafts().create(userId='me', body=draft_body).execute()
+                            st.success("Draft saved to Gmail successfully!")
+                            st.session_state.drafts_saved_count += 1
+                            st.session_state.cleanup_history.append({
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "action": "Saved Draft",
+                                "target": comp_to
+                            })
+                            st.session_state.composed_text = ""
+                        except Exception as err:
+                            st.error(f"Failed to save draft: {err}")
+                else:
+                    st.warning("Please provide a recipient email.")
+
 # Execute regular scan
 if run_btn:
     with st.spinner(f"Scanning up to {max_scan_limit} active emails for {account_selector}..."):
@@ -489,6 +537,8 @@ if run_btn:
                         category = classification["category"]
                         relationship, lead_details = classify_relationship_and_lead(sender, subject, snippet)
                         invoice_data = process_invoice_data(subject, snippet)
+                        tasks, deadlines = extract_tasks_and_deadlines(subject, snippet)
+                        meeting_info = detect_meeting_details(subject, snippet)
 
                         email_data = {
                             "id": msg_id,
@@ -506,6 +556,9 @@ if run_btn:
                             "relationship": relationship,
                             "lead_details": lead_details,
                             "invoice_data": invoice_data,
+                            "tasks": tasks,
+                            "deadlines": deadlines,
+                            "meeting": meeting_info,
                             "is_enquiry": classification.get("is_enquiry", False),
                             "is_whitelisted": classification.get("is_whitelisted", False),
                             "security_warnings": security_warnings,
@@ -581,6 +634,9 @@ if scan_spam_btn:
                                 "relationship": "Vendor / Service",
                                 "lead_details": None,
                                 "invoice_data": {"is_invoice": False},
+                                "tasks": [],
+                                "deadlines": [],
+                                "meeting": {"is_meeting": False},
                                 "is_enquiry": False,
                                 "is_whitelisted": False,
                                 "security_warnings": [],
@@ -675,22 +731,224 @@ with main_tabs[3]:
 # --- Tab 5: Active Inbox Feed ---
 with main_tabs[4]:
     if st.session_state.analyzed_emails:
-        for item in st.session_state.analyzed_emails:
-            with st.container(border=True):
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(f"**From:** {item['sender']} (`{item['relationship']}`)")
-                    st.markdown(f"**Subject:** {item['subject']}")
-                with c2:
-                    st.markdown(f"**Priority:** `{item['priority']}`")
-                
-                st.markdown(f"**AI Summary:** {item['summary']}")
-                
-                assignee = st.selectbox(
-                    "Assign Team Member:", 
-                    ["Unassigned", "Ramesh R. (Project Head)", "Rajeev", "Technical Team"], 
-                    key=f"team_{item['id']}"
-                )
-                st.session_state.team_assignments[item['id']] = assignee
+        # Category Tabs inside Inbox Feed
+        feed_tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
+        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
+        
+        for i, tab in enumerate(feed_tabs):
+            current_cat = bin_keys[i]
+            items = [e for e in st.session_state.analyzed_emails if e['category'] == current_cat]
+            
+            with tab:
+                if not items:
+                    st.info("No emails found in this category.")
+                else:
+                    for item in items:
+                        with st.container(border=True):
+                            c1, c2, c3 = st.columns([0.2, 2.8, 1])
+                            
+                            with c1:
+                                is_selected = st.checkbox("", key=f"chk_{item['id']}")
+                                if is_selected and item['id'] not in st.session_state.bulk_selected_ids:
+                                    st.session_state.bulk_selected_ids.append(item['id'])
+                                elif not is_selected and item['id'] in st.session_state.bulk_selected_ids:
+                                    st.session_state.bulk_selected_ids.remove(item['id'])
+
+                            with c2:
+                                st.markdown(f"**From:** {item['sender']} (`{item['relationship']}`)")
+                                st.markdown(f"**Subject:** {item['subject']}")
+                                if item.get("is_enquiry", False):
+                                    st.markdown("🏷️ `Client Enquiry`")
+                                if item.get("is_whitelisted", False):
+                                    st.markdown("🛡️ `Whitelisted Contact (Protected)`")
+
+                            with c3:
+                                prio_color = "red" if item['priority'] == 'High' else ("orange" if item['priority'] == 'Medium' else "green")
+                                st.markdown(f"**Priority:** :{prio_color}[{item['priority']}]")
+                                st.markdown(f"**Action:** `{item['action_required']}`")
+                            
+                            st.markdown(f"**AI Summary:** {item['summary']}")
+                            st.caption(f"Reason: {item['reason']}")
+
+                            # Team Assignment
+                            assignee = st.selectbox(
+                                "Assign Team Member:", 
+                                ["Unassigned", "Ramesh R. (Project Head)", "Rajeev", "Technical Team"], 
+                                key=f"team_{item['id']}"
+                            )
+                            st.session_state.team_assignments[item['id']] = assignee
+
+                            # Security Warning Box
+                            if item.get("security_warnings"):
+                                st.markdown("---")
+                                for warn in item["security_warnings"]:
+                                    st.error(warn)
+
+                            # Tasks & Deadlines Box
+                            if item['tasks'] or item['deadlines']:
+                                st.markdown("---")
+                                st.markdown("**📋 Extracted Tasks & Deadlines:**")
+                                for t in item['tasks']:
+                                    st.markdown(f"- 📌 Task: {t}")
+                                for d in item['deadlines']:
+                                    st.markdown(f"- ⏰ Deadline: {d}")
+
+                            # Meeting Automation Box
+                            if item['meeting']['is_meeting']:
+                                st.markdown("---")
+                                st.markdown("**📅 Meeting Automation:**")
+                                st.info(f"Detected Meeting Request: {item['meeting']['title']} (Suggested: {item['meeting']['suggested_time']})")
+                                if st.button("📅 Add Event to Google Calendar", key=f"cal_{item['id']}"):
+                                    cal_service = get_calendar_service()
+                                    if cal_service:
+                                        try:
+                                            start_time = (datetime.utcnow() + timedelta(days=1)).isoformat() + 'Z'
+                                            end_time = (datetime.utcnow() + timedelta(days=1, hours=1)).isoformat() + 'Z'
+                                            event = {
+                                                'summary': item['meeting']['title'],
+                                                'description': f"Automated meeting invite created from email snippet: {item['snippet']}",
+                                                'start': {'dateTime': start_time},
+                                                'end': {'dateTime': end_time},
+                                            }
+                                            cal_service.events().insert(calendarId='primary', body=event).execute()
+                                            st.success("Meeting event added to Google Calendar!")
+                                        except Exception as cal_err:
+                                            st.error(f"Calendar error: {cal_err}")
+
+                            if item['trashed']:
+                                st.error("🗑️ *Moved to Trash (Synced with Gmail).*")
+
+                            # Action Buttons
+                            btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns(5)
+                            service = get_gmail_service()
+                            
+                            with btn_col1:
+                                star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
+                                if st.button(star_label, key=f"star_{item['id']}"):
+                                    if service:
+                                        body = {'removeLabelIds': ['STARRED']} if item.get('is_starred', False) else {'addLabelIds': ['STARRED']}
+                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
+                                        item['is_starred'] = not item.get('is_starred', False)
+                                        st.rerun()
+
+                            with btn_col2:
+                                read_label = "✉️ Unread" if not item.get('is_unread', False) else "📩 Read"
+                                if st.button(read_label, key=f"read_{item['id']}"):
+                                    if service:
+                                        body = {'addLabelIds': ['UNREAD']} if not item.get('is_unread', False) else {'removeLabelIds': ['UNREAD']}
+                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
+                                        item['is_unread'] = not item.get('is_unread', False)
+                                        st.rerun()
+
+                            with btn_col3:
+                                if st.button("📥 Archive", key=f"arch_{item['id']}"):
+                                    if service:
+                                        service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
+                                        st.session_state.cleanup_history.append({
+                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "action": "Archived",
+                                            "target": f"{item['subject']}"
+                                        })
+                                        st.success("Archived!")
+
+                            with btn_col4:
+                                unsub_link = item.get('unsubscribe', '')
+                                if unsub_link:
+                                    if st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}"):
+                                        st.session_state.cleanup_history.append({
+                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "action": "Unsubscribed",
+                                            "target": f"{item['sender']}"
+                                        })
+                                        st.markdown(f"[Click here to Unsubscribe]({unsub_link})", unsafe_allow_html=True)
+                                else:
+                                    st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}", disabled=True)
+
+                            with btn_col5:
+                                if st.button("🗑️ Delete", key=f"del_{item['id']}"):
+                                    if service:
+                                        try:
+                                            service.users().messages().trash(userId='me', id=item['id']).execute()
+                                            item['trashed'] = True
+                                            st.session_state.cleanup_history.append({
+                                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                "action": "Trashed",
+                                                "target": f"{item['subject']}"
+                                            })
+                                            st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] != item['id']]
+                                            st.success("Deleted from Gmail successfully!")
+                                            st.rerun()
+                                        except Exception as err:
+                                            st.error(f"Delete Error: {err}")
+
+                            # Advanced AI Reply, Tone & Grammar Expander
+                            with st.expander("✨ AI Reply Generator, Follow-up Automation & Tone Controls"):
+                                selected_tone = st.selectbox(
+                                    "Select Tone:", 
+                                    ["Professional", "Friendly", "Formal", "Concise", "Customized"], 
+                                    key=f"tone_{item['id']}"
+                                )
+                                
+                                custom_instructions = st.text_input(
+                                    "Customization / Specific instruction (optional):", 
+                                    key=f"inst_{item['id']}"
+                                )
+                                
+                                current_reply = item.get('suggested_reply', '')
+                                
+                                col_ai1, col_ai2, col_ai3, col_ai4 = st.columns(4)
+                                with col_ai1:
+                                    if st.button("🤖 Generate AI Reply", key=f"gen_{item['id']}"):
+                                        prompt_ai = f"Write a reply to this email from {item['sender']} with subject '{item['subject']}' and snippet '{item['snippet']}'. Use a {selected_tone} tone. Additional instruction: {custom_instructions}."
+                                        current_reply = generate_ai_text(prompt_ai)
+                                        item['suggested_reply'] = current_reply
+                                        st.session_state.ai_replies_generated_count += 1
+                                        st.rerun()
+                                with col_ai2:
+                                    if st.button("✨ Improve Grammar", key=f"gram_{item['id']}"):
+                                        prompt_ai = f"Improve the grammar, clarity, and phrasing of this draft reply in a {selected_tone} tone: '{current_reply}'"
+                                        current_reply = generate_ai_text(prompt_ai)
+                                        item['suggested_reply'] = current_reply
+                                        st.rerun()
+                                with col_ai3:
+                                    if st.button("📉 Shorten", key=f"short_{item['id']}"):
+                                        prompt_ai = f"Make this draft reply more concise and shorter while keeping its meaning: '{current_reply}'"
+                                        current_reply = generate_ai_text(prompt_ai)
+                                        item['suggested_reply'] = current_reply
+                                        st.rerun()
+                                with col_ai4:
+                                    if st.button("🔄 Follow-up Draft", key=f"fol_{item['id']}"):
+                                        prompt_ai = f"Compose a polite follow-up draft checking in on the status of this email: '{item['subject']}' sent to {item['sender']}."
+                                        current_reply = generate_ai_text(prompt_ai)
+                                        item['suggested_reply'] = current_reply
+                                        st.rerun()
+
+                                reply_text = st.text_area("Edit Draft Reply:", value=item.get('suggested_reply', ''), key=f"reply_{item['id']}")
+                                
+                                if st.button("📥 Save Draft to Gmail (In-Thread)", key=f"draft_{item['id']}"):
+                                    if service:
+                                        try:
+                                            from email.mime.text import MIMEText
+                                            msg = MIMEText(reply_text)
+                                            msg['Subject'] = f"Re: {item['subject']}"
+                                            msg['To'] = item['sender']
+                                            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+                                            
+                                            draft_body = {
+                                                'message': {
+                                                    'threadId': item['threadId'],
+                                                    'raw': raw
+                                                }
+                                            }
+                                            service.users().drafts().create(userId='me', body=draft_body).execute()
+                                            st.session_state.drafts_saved_count += 1
+                                            st.session_state.cleanup_history.append({
+                                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                "action": "Saved Reply Draft",
+                                                "target": f"{item['subject']}"
+                                            })
+                                            st.success("Successfully saved as an in-thread draft in your Gmail account!")
+                                        except Exception as err:
+                                            st.error(f"Failed to create draft: {err}")
     else:
-        st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** in the sidebar to begin.")
+        st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** or **'🚀 Scan Spam Separately'** in the sidebar to begin.")
