@@ -69,22 +69,24 @@ def analyze_email_with_gemini(subject, sender, snippet):
     if not GEMINI_API_KEY:
         return "Category: General\nSummary: Gemini API Key missing."
     
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = f"""
-    Analyze this email and strictly follow this output format:
-    Category: [Urgent, Client Project, Security Alert, Spam, General]
-    Summary: [1-sentence summary]
-    
-    Sender: {sender}
-    Subject: {subject}
-    Snippet: {snippet}
-    """
-    # Using the universal stable latest flash endpoint
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt,
-    )
-    return response.text
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = f"""
+        Analyze this email and strictly follow this output format:
+        Category: [Urgent, Client Project, Security Alert, Spam, General]
+        Summary: [1-sentence summary]
+        
+        Sender: {sender}
+        Subject: {subject}
+        Snippet: {snippet}
+        """
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return response.text
+    except Exception as e:
+        return f"Category: General\nSummary: AI processing error ({e})"
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent")
@@ -126,7 +128,7 @@ with col2:
                         for msg in messages:
                             msg_id = msg['id']
                             txt = service.users().messages().get(userId='me', id=msg_id).execute()
-                            headers = txt['payload']['headers']
+                            headers = txt.get('payload', {}).get('headers', [])
                             
                             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
