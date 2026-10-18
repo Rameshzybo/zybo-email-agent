@@ -84,8 +84,9 @@ def analyze_email_with_gemini(subject, sender, snippet):
         Subject: {subject}
         Snippet: {snippet}
         """
+        # Updated to gemini-3.8-flash as mandated by the API error response
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
         return response.text
@@ -118,17 +119,17 @@ if run_btn:
     if not GEMINI_API_KEY:
         st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
     else:
-        with st.spinner("Scanning all folders (Inbox, Spam, Archive), analyzing with Gemini, and sorting..."):
+        with st.spinner("Scanning Inbox, Spam, & Archives, analyzing with Gemini, and sorting..."):
             service = get_gmail_service()
             if service:
                 messages = []
                 page_token = None
                 
-                # Full pagination scan including Spam & Trash
+                # Scan across all folders including Spam and Trash explicitly
                 while len(messages) < max_scan_limit:
                     results = service.users().messages().list(
                         userId='me', 
-                        q='', 
+                        q='in:anywhere', 
                         includeSpamTrash=True, 
                         maxResults=min(50, max_scan_limit - len(messages)),
                         pageToken=page_token
@@ -157,6 +158,7 @@ if run_btn:
                             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                             snippet = txt.get('snippet', '')
+                            label_ids = txt.get('labelIds', [])
 
                             ai_response = analyze_email_with_gemini(subject, sender, snippet)
                             
@@ -184,6 +186,10 @@ if run_btn:
                                 elif "Suggested Reply:" in line:
                                     suggested_reply = line.replace("Suggested Reply:", "").strip()
 
+                            # Force classification override if Gmail already marks it as SPAM
+                            if 'SPAM' in label_ids:
+                                category = 'Spam'
+
                             email_data = {
                                 "id": msg_id,
                                 "sender": sender,
@@ -200,7 +206,7 @@ if run_btn:
 
                             # Perform Trashing if conditions match
                             should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                            if should_trash and not require_confirmation:
+                            if should_trash and not require_confirmation and 'TRASH' not in label_ids:
                                 try:
                                     service.users().messages().trash(userId='me', id=msg_id).execute()
                                     email_data["trashed"] = True
