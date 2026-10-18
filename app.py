@@ -197,7 +197,8 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    max_scan_limit = st.slider("Max emails to scan", 5, 200, 50)
+    # Increased slider range up to 1000 emails
+    max_scan_limit = st.slider("Max emails to scan", 50, 1000, 100)
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
@@ -212,7 +213,7 @@ if run_btn:
     if not GEMINI_API_KEY:
         st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
     else:
-        with st.spinner("Scanning Gmail account, parsing threads & attachments, and running AI analysis..."):
+        with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders (Inbox, Spam, Trash)..."):
             service = get_gmail_service()
             if service:
                 messages = []
@@ -220,11 +221,12 @@ if run_btn:
                 q_query = f"in:anywhere {search_keyword}".strip()
 
                 while len(messages) < max_scan_limit:
+                    fetch_size = min(100, max_scan_limit - len(messages))
                     results = service.users().messages().list(
                         userId='me', 
                         q=q_query, 
                         includeSpamTrash=True, 
-                        maxResults=min(50, max_scan_limit - len(messages)),
+                        maxResults=fetch_size,
                         pageToken=page_token
                     ).execute()
                     
@@ -416,7 +418,7 @@ if st.session_state.analyzed_emails:
                                         st.success("Deleted successfully!")
                                         st.rerun()
                                     except Exception as err:
-                                        st.error(f"Error: {err}")
+                                        st.error(f"Delete Error (Ensure your token has gmail.modify scope): {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
