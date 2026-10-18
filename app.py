@@ -154,7 +154,7 @@ def parse_attachment_content(service, msg_id, part):
                 filtered_row = [str(cell) for cell in row if cell is not None]
                 if filtered_row:
                     rows.append(" | ".join(filtered_row))
-            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5]}..."
+            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5])}"
 
         return filename, f"[Attached File]: {filename}"
     except Exception as e:
@@ -690,11 +690,9 @@ with main_tabs[0]:
             st.caption("No automation or cleanup actions recorded yet in this session.")
 
 with main_tabs[1]:
-    # Scheduled Briefing Banner & Notifications
     if st.session_state.analyzed_emails:
         emails = st.session_state.analyzed_emails
 
-        # Action History & Bulk Options Bar
         with st.expander("📜 Cleanup History & Bulk Preview Actions", expanded=False):
             col_h1, col_h2 = st.columns([2, 1])
             with col_h1:
