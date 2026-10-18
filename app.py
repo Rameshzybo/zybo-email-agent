@@ -68,10 +68,22 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 # --- Smart Local Rule Classifier with Expanded Digest & Promo Matching ---
-def classify_email_locally(subject, sender, snippet, headers):
+def classify_email_locally(subject, sender, snippet, headers, label_ids):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
     send_lower = sender.lower()
+
+    # If Gmail natively marks it as SPAM, respect it immediately
+    if 'SPAM' in label_ids:
+        return {
+            "category": "Spam",
+            "priority": "Low",
+            "reason": "Marked as Spam by Gmail filter.",
+            "action_required": "None",
+            "summary": f"Spam message from {sender}",
+            "suggested_reply": "N/A",
+            "unsubscribe": ""
+        }
 
     # Extract List-Unsubscribe header if present
     unsubscribe_link = ""
@@ -207,12 +219,9 @@ if run_btn:
                         sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                         snippet = txt.get('snippet', '')
 
-                        classification = classify_email_locally(subject, sender, snippet, headers)
+                        classification = classify_email_locally(subject, sender, snippet, headers, label_ids)
                         
                         category = classification["category"]
-                        if 'SPAM' in label_ids:
-                            category = 'Spam'
-
                         is_trashed = 'TRASH' in label_ids
 
                         email_data = {
@@ -232,14 +241,14 @@ if run_btn:
                             "trashed": is_trashed
                         }
 
-                        # Auto-Cleanup Execution
+                        # Auto-Cleanup Execution (Sends directly to Gmail Trash via API)
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                         if should_trash and not require_confirmation and not is_trashed:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
-                            except Exception:
-                                pass
+                            except Exception as trash_err:
+                                st.warning(f"Could not auto-trash message {msg_id}: {trash_err}")
 
                         processed_items.append(email_data)
                         
@@ -339,6 +348,7 @@ if st.session_state.analyzed_emails:
                             if st.button("🗑️ Delete", key=f"del_{item['id']}"):
                                 if service:
                                     try:
+                                        # Forces true Gmail API trash sync
                                         service.users().messages().trash(userId='me', id=item['id']).execute()
                                         item['trashed'] = True
                                         st.success("Deleted from Gmail successfully!")
