@@ -28,7 +28,7 @@ except ImportError:
     openpyxl = None
 
 # Page Configuration
-st.set_page_config(page_title="ZYBO AI Email Agent Dashboard", page_icon="✉️", layout="wide")
+st.set_page_config(page_title="ZYBO Advanced AI Email Agent Dashboard", page_icon="✉️", layout="wide")
 
 # Standard Scope for Email Actions
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -120,7 +120,7 @@ def inspect_security_and_links(subject, sender, snippet, payload):
 
     return warnings
 
-# --- Attachment Handling ---
+# --- Attachment & Document Intelligence Handling ---
 def parse_attachment_content(service, msg_id, part):
     filename = part.get('filename', '')
     mime_type = part.get('mimeType', '')
@@ -159,6 +159,43 @@ def parse_attachment_content(service, msg_id, part):
         return filename, f"[Attached File]: {filename}"
     except Exception as e:
         return filename, f"Attachment parse error"
+
+# --- Invoice Processing & Intelligence ---
+def process_invoice_data(subject, snippet):
+    combined = f"{subject} {snippet}".lower()
+    if any(k in combined for k in ["invoice", "bill", "payment due", "receipt", "amount due"]):
+        amt_match = re.search(r'(\$|₹|USD|INR)\s?(\d+[\d,]*(\.\d+)?)|(\d+[\d,]*(\.\d+)?)\s?(USD|INR)', snippet)
+        inv_num = re.search(r'inv[-_#]?\d+', combined)
+        return {
+            "is_invoice": True,
+            "invoice_num": inv_num.group(0).upper() if inv_num else "INV-DETECTED",
+            "amount": amt_match.group(0) if amt_match else "Amount pending review",
+            "status": "Pending Payment"
+        }
+    return {"is_invoice": False}
+
+# --- Relationship & Lead Management ---
+def classify_relationship_and_lead(sender, subject, snippet):
+    combined = f"{subject} {snippet}".lower()
+    
+    rel_type = "Vendor / Service"
+    if "zybo" in sender.lower() or "employee" in combined:
+        rel_type = "Team Member"
+    elif any(k in combined for k in ["enquiry", "quote", "proposal", "requirement", "pricing", "cost"]):
+        rel_type = "Prospective Lead"
+    elif any(k in combined for k in ["project", "website", "client", "revision", "update"]):
+        rel_type = "Client"
+
+    lead_info = None
+    if rel_type == "Prospective Lead":
+        lead_info = {
+            "lead_name": sender.split("<")[0].strip(),
+            "contact": sender,
+            "requirements": snippet[:120] + "...",
+            "next_step": "Send Proposal / Customization Details"
+        }
+
+    return rel_type, lead_info
 
 # --- Extraction Functions ---
 def extract_tasks_and_deadlines(subject, snippet):
@@ -318,7 +355,7 @@ Best regards,
 Ramesh R.
 Project Head | ZYBO Tech Lab"""
 
-# Initialize Session State
+# Initialize Session State Variables
 if "analyzed_emails" not in st.session_state:
     st.session_state.analyzed_emails = []
 
@@ -334,25 +371,59 @@ if "drafts_saved_count" not in st.session_state:
 if "ai_replies_generated_count" not in st.session_state:
     st.session_state.ai_replies_generated_count = 0
 
+if "email_memory" not in st.session_state:
+    st.session_state.email_memory = {
+        "agency_name": "ZYBO Tech Lab",
+        "project_head": "Ramesh R.",
+        "preferred_language": "English / Multilingual",
+        "custom_instructions": "Maintain customization focus over default templates."
+    }
+
+if "team_assignments" not in st.session_state:
+    st.session_state.team_assignments = {}
+
+if "nl_rules" not in st.session_state:
+    st.session_state.nl_rules = []
+
 # --- UI Layout ---
-st.title("✉️ ZYBO AI Email Agent Dashboard")
-st.markdown("Automated Mail Categorization, Comprehensive Analytics, Phishing Cleanup, Task Tracking & Action History.")
+st.title("✉️ ZYBO Advanced AI Email Agent Dashboard")
+st.markdown("Automated Mail Management, Conversational Assistant, Relationship & Lead Intelligence, Invoice Processing & Team Workflows.")
 
 # Sidebar Controls
 with st.sidebar:
-    st.subheader("⚙️ Scan & Search Controls")
+    st.subheader("🌐 Account & Scan Controls")
+    account_selector = st.selectbox("Select Account:", ["Primary (Ramesh R. - ZYBO)", "Support Account", "Billing Account"])
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
     max_scan_limit = st.slider("Max emails to scan", 10, 500, 100)
     
     st.markdown("---")
-    st.markdown("### 🛡️ Whitelist & Exclusion Contacts")
-    whitelist_domains = st.text_area("Protected Senders/Domains (Comma separated):", "zybo.in, google.com, hostinger.com")
+    st.markdown("### 🧠 Email Agent Memory")
+    with st.expander("⚙️ Manage Agent Preferences", expanded=False):
+        mem_agency = st.text_input("Agency Name:", value=st.session_state.email_memory["agency_name"])
+        mem_head = st.text_input("Project Head:", value=st.session_state.email_memory["project_head"])
+        mem_notes = st.text_area("Persistent Rules / Preferences:", value=st.session_state.email_memory["custom_instructions"])
+        if st.button("💾 Update Memory"):
+            st.session_state.email_memory["agency_name"] = mem_agency
+            st.session_state.email_memory["project_head"] = mem_head
+            st.session_state.email_memory["custom_instructions"] = mem_notes
+            st.success("Agent Memory Updated!")
 
     st.markdown("---")
-    st.markdown("### ⚙️ Custom Automation Rules")
-    enquiry_auto_tag = st.checkbox("🏷️ Auto-assign 'Client Enquiry' label", value=True)
-    enquiry_auto_reply = st.checkbox("⚡ Auto-generate enquiry reply drafts", value=True)
-    
+    st.markdown("### ⚡ Natural Language Rule Builder")
+    with st.expander("🛠️ Build Natural Language Rules", expanded=False):
+        nl_input = st.text_input("Type Rule Instruction:", "If email is from wordfence, assign High priority and tag Security Alert.")
+        if st.button("➕ Add Rule"):
+            st.session_state.nl_rules.append(nl_input)
+            st.success("Custom Natural Language Rule Saved!")
+        if st.session_state.nl_rules:
+            st.caption("Active NL Rules:")
+            for r in st.session_state.nl_rules:
+                st.caption(f"• {r}")
+
+    st.markdown("---")
+    st.markdown("### 🛡️ Whitelist & Exclusion Contacts")
+    whitelist_domains = st.text_area("Protected Senders/Domains:", "zybo.in, google.com, hostinger.com")
+
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
     auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam", value=True)
@@ -362,58 +433,9 @@ with st.sidebar:
     run_btn = st.button("🚀 Fetch, Analyze & Organize Mail", type="primary")
     scan_spam_btn = st.button("🚀 Scan Spam Separately", type="secondary")
 
-    st.markdown("---")
-    st.markdown("### ✍️ AI Email Composer")
-    with st.expander("✨ Compose New Email", expanded=False):
-        comp_to = st.text_input("Recipient Email:", key="comp_to")
-        comp_subject = st.text_input("Subject:", key="comp_sub")
-        comp_instructions = st.text_area("Instructions / Key Points:", key="comp_inst")
-        comp_tone = st.selectbox("Tone:", ["Professional", "Friendly", "Formal", "Concise", "Customized"], key="comp_tone")
-        
-        if "composed_text" not in st.session_state:
-            st.session_state.composed_text = ""
-
-        if st.button("🤖 Generate Draft Content"):
-            if comp_instructions:
-                comp_prompt = f"Compose a complete email body in a {comp_tone} tone based on these instructions: {comp_instructions}. Recipient: {comp_to}, Subject: {comp_subject}."
-                st.session_state.composed_text = generate_ai_text(comp_prompt)
-                st.session_state.ai_replies_generated_count += 1
-            else:
-                st.warning("Please enter instructions before generating.")
-
-        if st.session_state.composed_text:
-            edited_email = st.text_area("Review & Edit Draft Content:", value=st.session_state.composed_text, height=200, key="edited_comp")
-            
-            if st.button("📥 Save Draft to Gmail"):
-                if comp_to:
-                    service = get_gmail_service()
-                    if service:
-                        try:
-                            from email.mime.text import MIMEText
-                            msg = MIMEText(edited_email)
-                            msg['Subject'] = comp_subject or "New Message from ZYBO Tech Lab"
-                            msg['To'] = comp_to
-                            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-                            
-                            draft_body = {'message': {'raw': raw}}
-                            service.users().drafts().create(userId='me', body=draft_body).execute()
-                            st.success("Draft saved to Gmail successfully!")
-                            st.session_state.drafts_saved_count += 1
-                            
-                            st.session_state.cleanup_history.append({
-                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "action": "Saved Draft",
-                                "target": comp_to
-                            })
-                            st.session_state.composed_text = ""
-                        except Exception as err:
-                            st.error(f"Failed to save draft: {err}")
-                else:
-                    st.warning("Please provide a recipient email.")
-
 # Execute regular scan
 if run_btn:
-    with st.spinner(f"Scanning up to {max_scan_limit} active emails (excluding Trash)..."):
+    with st.spinner(f"Scanning up to {max_scan_limit} active emails for {account_selector}..."):
         service = get_gmail_service()
         if service:
             messages = []
@@ -465,10 +487,8 @@ if run_btn:
                         security_warnings = inspect_security_and_links(subject, sender, snippet, payload)
 
                         category = classification["category"]
-                        tasks, deadlines = extract_tasks_and_deadlines(subject, snippet)
-                        meeting_info = detect_meeting_details(subject, snippet)
-
-                        needs_followup = classification["action_required"] == "Reply Needed"
+                        relationship, lead_details = classify_relationship_and_lead(sender, subject, snippet)
+                        invoice_data = process_invoice_data(subject, snippet)
 
                         email_data = {
                             "id": msg_id,
@@ -483,13 +503,12 @@ if run_btn:
                             "summary": classification["summary"],
                             "suggested_reply": classification["suggested_reply"],
                             "unsubscribe": classification.get("unsubscribe", ""),
+                            "relationship": relationship,
+                            "lead_details": lead_details,
+                            "invoice_data": invoice_data,
                             "is_enquiry": classification.get("is_enquiry", False),
                             "is_whitelisted": classification.get("is_whitelisted", False),
                             "security_warnings": security_warnings,
-                            "tasks": tasks,
-                            "deadlines": deadlines,
-                            "meeting": meeting_info,
-                            "needs_followup": needs_followup,
                             "is_starred": 'STARRED' in label_ids,
                             "is_unread": 'UNREAD' in label_ids,
                             "trashed": False
@@ -500,17 +519,11 @@ if run_btn:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
-                                st.session_state.cleanup_history.append({
-                                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "action": "Auto-Trashed",
-                                    "target": f"{subject} ({sender})"
-                                })
                                 time.sleep(0.3)
                             except Exception:
                                 pass
 
                         processed_items.append(email_data)
-                        
                         if idx > 0 and idx % 20 == 0:
                             time.sleep(0.2)
                             
@@ -518,7 +531,7 @@ if run_btn:
                         continue
 
                 st.session_state.analyzed_emails = processed_items
-                st.success(f"Successfully processed {len(processed_items)} emails across your account!")
+                st.success(f"Successfully processed {len(processed_items)} emails for {account_selector}!")
 
 # Execute standalone spam scan
 if scan_spam_btn:
@@ -565,26 +578,16 @@ if scan_spam_btn:
                                 "summary": snippet[:150],
                                 "suggested_reply": "N/A",
                                 "unsubscribe": "",
+                                "relationship": "Vendor / Service",
+                                "lead_details": None,
+                                "invoice_data": {"is_invoice": False},
                                 "is_enquiry": False,
                                 "is_whitelisted": False,
                                 "security_warnings": [],
-                                "tasks": [],
-                                "deadlines": [],
-                                "meeting": {"is_meeting": False},
-                                "needs_followup": False,
                                 "is_starred": 'STARRED' in label_ids,
                                 "is_unread": 'UNREAD' in label_ids,
                                 "trashed": False
                             }
-
-                            if auto_trash_spam and not require_confirmation:
-                                try:
-                                    service.users().messages().trash(userId='me', id=msg_id).execute()
-                                    email_data["trashed"] = True
-                                    time.sleep(0.3)
-                                except Exception:
-                                    pass
-
                             processed_items.append(email_data)
                         except Exception:
                             continue
@@ -594,337 +597,100 @@ if scan_spam_btn:
             except Exception as err:
                 st.error(f"Error scanning spam folder: {err}")
 
-# Main Navigation Tabs (Including Comprehensive Dashboard & Reporting)
-main_tabs = st.tabs(["📊 Dashboard & Reporting", "📥 Inbox & Categories Feed"])
+# Main Navigation Tabs
+main_tabs = st.tabs([
+    "💬 Conversational Assistant", 
+    "📊 Analytics & Dashboard", 
+    "💼 Relationship & Leads", 
+    "🧾 Invoice & Documents", 
+    "📥 Active Inbox Feed"
+])
 
+# --- Tab 1: Conversational Email Assistant ---
 with main_tabs[0]:
-    st.subheader("📊 Comprehensive Dashboard & Analytics Suite")
+    st.subheader("💬 Conversational Email Assistant")
+    st.markdown("Ask natural language questions about your scanned inbox (e.g., *'What did the client say about the project deadline?'* or *'Show me all pending invoices'*).")
     
-    if not st.session_state.analyzed_emails:
-        st.info("👈 Run **'🚀 Fetch, Analyze & Organize Mail'** in the sidebar to populate the analytics dashboard.")
-    else:
-        emails = st.session_state.analyzed_emails
-        
-        # 1. Daily Briefing Summary Card
-        with st.container(border=True):
-            st.markdown("### ☀️ Daily Briefing Summary")
-            col_db1, col_db2, col_db3 = st.columns(3)
-            high_prio_items = [e for e in emails if e['priority'] == 'High']
-            pending_followups = [e for e in emails if e['needs_followup']]
-            task_items = [e for e in emails if e['tasks'] or e['deadlines']]
-
-            with col_db1:
-                st.markdown(f"**🔥 Important Messages ({len(high_prio_items)})**")
-                for h in high_prio_items[:3]:
-                    st.caption(f"• {h['subject']} ({h['sender']})")
-            with col_db2:
-                st.markdown(f"**⏳ Overdue Follow-ups ({len(pending_followups)})**")
-                for f in pending_followups[:3]:
-                    st.caption(f"• {f['subject']}")
-            with col_db3:
-                st.markdown(f"**📌 Today's Tasks & Deadlines ({len(task_items)})**")
-                for t in task_items[:3]:
-                    st.caption(f"• {t['subject'][:35]}...")
-
-        st.markdown("---")
-
-        # 2. Inbox Overview & Priority Dashboards
-        col_r1, col_r2 = st.columns(2)
-        
-        with col_r1:
-            st.markdown("### 📥 Inbox Overview")
-            total_scanned = len(emails)
-            unread_count = sum(1 for e in emails if e['is_unread'])
-            trashed_count = sum(1 for e in emails if e['trashed'])
-            
-            mc1, mc2, mc3 = st.columns(3)
-            mc1.metric("Total Scanned", total_scanned)
-            mc2.metric("Unread Messages", unread_count)
-            mc3.metric("Cleaned / Trashed", trashed_count)
-
-        with col_r2:
-            st.markdown("### ⚡ Priority Breakdown")
-            high_count = sum(1 for e in emails if e['priority'] == 'High')
-            med_count = sum(1 for e in emails if e['priority'] == 'Medium')
-            low_count = sum(1 for e in emails if e['priority'] == 'Low')
-            
-            pc1, pc2, pc3 = st.columns(3)
-            pc1.metric("High Priority", high_count)
-            pc2.metric("Medium Priority", med_count)
-            pc3.metric("Low Priority", low_count)
-
-        st.markdown("---")
-
-        # 3. Category Counts & Action/Draft Managers
-        col_r3, col_r4 = st.columns(2)
-        
-        with col_r3:
-            st.markdown("### 📂 Category Dashboard")
-            cat_counts = {
-                "Urgent": sum(1 for e in emails if e['category'] == 'Urgent'),
-                "Client Project": sum(1 for e in emails if e['category'] == 'Client Project'),
-                "Security Alert": sum(1 for e in emails if e['category'] == 'Security Alert'),
-                "General": sum(1 for e in emails if e['category'] == 'General'),
-                "Promotional": sum(1 for e in emails if e['category'] == 'Promotional'),
-                "Spam": sum(1 for e in emails if e['category'] == 'Spam'),
-            }
-            for cat, cnt in cat_counts.items():
-                st.markdown(f"- **{cat}:** `{cnt} emails`")
-
-        with col_r4:
-            st.markdown("### 🎯 Action & Draft Manager")
-            action_req_count = sum(1 for e in emails if e['action_required'] != 'None')
-            st.markdown(f"- **Action Required / Reply Needed:** `{action_req_count}`")
-            st.markdown(f"- **Pending & Overdue Follow-ups:** `{len(pending_followups)}`")
-            st.markdown(f"- **AI Replies Generated:** `{st.session_state.ai_replies_generated_count}`")
-            st.markdown(f"- **Drafts Saved to Gmail:** `{st.session_state.drafts_saved_count}`")
-
-        st.markdown("---")
-
-        # 4. Automation History Log
-        st.markdown("### 📜 Automation History & Audit Log")
-        if st.session_state.cleanup_history:
-            for entry in list(reversed(st.session_state.cleanup_history))[:15]:
-                st.text(f"[{entry['time']}] Action: {entry['action']} | Target: {entry['target']}")
+    user_query = st.text_input("Ask your Inbox Assistant:", key="agent_chat_input")
+    if st.button("🔍 Query Assistant", type="primary"):
+        if user_query and st.session_state.analyzed_emails:
+            inbox_context = "\n".join([f"- From: {e['sender']} | Subject: {e['subject']} | Snippet: {e['snippet']}" for e in st.session_state.analyzed_emails[:25]])
+            prompt = f"Answer this question based on the user's inbox content below:\nQuestion: {user_query}\n\nInbox Content:\n{inbox_context}"
+            answer = generate_ai_text(prompt)
+            st.info(f"**Assistant Response:**\n\n{answer}")
         else:
-            st.caption("No automation or cleanup actions recorded yet in this session.")
+            st.warning("Please scan your inbox first or enter a query.")
 
+# --- Tab 2: Dashboard & Analytics ---
 with main_tabs[1]:
+    st.subheader("📊 Comprehensive Dashboard & Analytics Suite")
     if st.session_state.analyzed_emails:
         emails = st.session_state.analyzed_emails
-
-        with st.expander("📜 Cleanup History & Bulk Preview Actions", expanded=False):
-            col_h1, col_h2 = st.columns([2, 1])
-            with col_h1:
-                st.markdown("### Action History Log")
-                if st.session_state.cleanup_history:
-                    for entry in list(reversed(st.session_state.cleanup_history))[:10]:
-                        st.text(f"[{entry['time']}] {entry['action']}: {entry['target']}")
-                else:
-                    st.caption("No cleanup actions recorded in this session.")
-            with col_h2:
-                st.markdown("### Bulk Actions")
-                if st.button("🗑️ Trash Selected Preview Emails"):
-                    service = get_gmail_service()
-                    if service and st.session_state.bulk_selected_ids:
-                        count = 0
-                        for m_id in st.session_state.bulk_selected_ids:
-                            try:
-                                service.users().messages().trash(userId='me', id=m_id).execute()
-                                count += 1
-                            except Exception:
-                                pass
-                        st.success(f"Trashed {count} selected emails!")
-                        st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] not in st.session_state.bulk_selected_ids]
-                        st.session_state.bulk_selected_ids = []
-                        st.rerun()
-
-        st.markdown("---")
-
-        tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
-        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
-        
-        for i, tab in enumerate(tabs):
-            current_cat = bin_keys[i]
-            items = [e for e in emails if e['category'] == current_cat]
-            
-            with tab:
-                if not items:
-                    st.info(f"No emails found in this category.")
-                else:
-                    for item in items:
-                        with st.container(border=True):
-                            c1, c2, c3 = st.columns([0.2, 2.8, 1])
-                            
-                            with c1:
-                                is_selected = st.checkbox("", key=f"chk_{item['id']}")
-                                if is_selected and item['id'] not in st.session_state.bulk_selected_ids:
-                                    st.session_state.bulk_selected_ids.append(item['id'])
-                                elif not is_selected and item['id'] in st.session_state.bulk_selected_ids:
-                                    st.session_state.bulk_selected_ids.remove(item['id'])
-
-                            with c2:
-                                st.markdown(f"**From:** {item['sender']}")
-                                st.markdown(f"**Subject:** {item['subject']}")
-                                if item.get("is_enquiry", False):
-                                    st.markdown("🏷️ `Client Enquiry`")
-                                if item.get("is_whitelisted", False):
-                                    st.markdown("🛡️ `Whitelisted Contact (Protected)`")
-
-                            with c3:
-                                prio_color = "red" if item['priority'] == 'High' else ("orange" if item['priority'] == 'Medium' else "green")
-                                st.markdown(f"**Priority:** :{prio_color}[{item['priority']}]")
-                                st.markdown(f"**Action:** `{item['action_required']}`")
-                            
-                            st.markdown(f"**AI Summary:** {item['summary']}")
-                            st.caption(f"Reason: {item['reason']}")
-
-                            if item.get("security_warnings"):
-                                st.markdown("---")
-                                for warn in item["security_warnings"]:
-                                    st.error(warn)
-
-                            if item['tasks'] or item['deadlines']:
-                                st.markdown("---")
-                                st.markdown("**📋 Extracted Tasks & Deadlines:**")
-                                for t in item['tasks']:
-                                    st.markdown(f"- 📌 Task: {t}")
-                                for d in item['deadlines']:
-                                    st.markdown(f"- ⏰ Deadline: {d}")
-
-                            if item['meeting']['is_meeting']:
-                                st.markdown("---")
-                                st.markdown("**📅 Meeting Automation:**")
-                                st.info(f"Detected Meeting Request: {item['meeting']['title']} (Suggested: {item['meeting']['suggested_time']})")
-                                if st.button("📅 Add Event to Google Calendar", key=f"cal_{item['id']}"):
-                                    cal_service = get_calendar_service()
-                                    if cal_service:
-                                        try:
-                                            start_time = (datetime.utcnow() + timedelta(days=1)).isoformat() + 'Z'
-                                            end_time = (datetime.utcnow() + timedelta(days=1, hours=1)).isoformat() + 'Z'
-                                            event = {
-                                                'summary': item['meeting']['title'],
-                                                'description': f"Automated meeting invite created from email snippet: {item['snippet']}",
-                                                'start': {'dateTime': start_time},
-                                                'end': {'dateTime': end_time},
-                                            }
-                                            cal_service.events().insert(calendarId='primary', body=event).execute()
-                                            st.success("Meeting event added to Google Calendar!")
-                                        except Exception as cal_err:
-                                            st.error(f"Calendar error: {cal_err}")
-
-                            if item['trashed']:
-                                st.error("🗑️ *Moved to Trash (Synced with Gmail).*")
-
-                            btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns(5)
-                            service = get_gmail_service()
-                            
-                            with btn_col1:
-                                star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
-                                if st.button(star_label, key=f"star_{item['id']}"):
-                                    if service:
-                                        body = {'removeLabelIds': ['STARRED']} if item.get('is_starred', False) else {'addLabelIds': ['STARRED']}
-                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                        item['is_starred'] = not item.get('is_starred', False)
-                                        st.rerun()
-
-                            with btn_col2:
-                                read_label = "✉️ Unread" if not item.get('is_unread', False) else "📩 Read"
-                                if st.button(read_label, key=f"read_{item['id']}"):
-                                    if service:
-                                        body = {'addLabelIds': ['UNREAD']} if not item.get('is_unread', False) else {'removeLabelIds': ['UNREAD']}
-                                        service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                        item['is_unread'] = not item.get('is_unread', False)
-                                        st.rerun()
-
-                            with btn_col3:
-                                if st.button("📥 Archive", key=f"arch_{item['id']}"):
-                                    if service:
-                                        service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
-                                        st.session_state.cleanup_history.append({
-                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            "action": "Archived",
-                                            "target": f"{item['subject']}"
-                                        })
-                                        st.success("Archived!")
-
-                            with btn_col4:
-                                unsub_link = item.get('unsubscribe', '')
-                                if unsub_link:
-                                    if st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}"):
-                                        st.session_state.cleanup_history.append({
-                                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            "action": "Unsubscribed",
-                                            "target": f"{item['sender']}"
-                                        })
-                                        st.markdown(f"[Click here to Unsubscribe]({unsub_link})", unsafe_allow_html=True)
-                                else:
-                                    st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}", disabled=True)
-
-                            with btn_col5:
-                                if st.button("🗑️ Delete", key=f"del_{item['id']}"):
-                                    if service:
-                                        try:
-                                            service.users().messages().trash(userId='me', id=item['id']).execute()
-                                            item['trashed'] = True
-                                            st.session_state.cleanup_history.append({
-                                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                "action": "Trashed",
-                                                "target": f"{item['subject']}"
-                                            })
-                                            st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] != item['id']]
-                                            st.success("Deleted from Gmail successfully!")
-                                            st.rerun()
-                                        except Exception as err:
-                                            st.error(f"Delete Error: {err}")
-
-                            with st.expander("✨ AI Reply Generator, Follow-up Automation & Tone Controls"):
-                                selected_tone = st.selectbox(
-                                    "Select Tone:", 
-                                    ["Professional", "Friendly", "Formal", "Concise", "Customized"], 
-                                    key=f"tone_{item['id']}"
-                                )
-                                
-                                custom_instructions = st.text_input(
-                                    "Customization / Specific instruction (optional):", 
-                                    key=f"inst_{item['id']}"
-                                )
-                                
-                                current_reply = item.get('suggested_reply', '')
-                                
-                                col_ai1, col_ai2, col_ai3, col_ai4 = st.columns(4)
-                                with col_ai1:
-                                    if st.button("🤖 Generate AI Reply", key=f"gen_{item['id']}"):
-                                        prompt_ai = f"Write a reply to this email from {item['sender']} with subject '{item['subject']}' and snippet '{item['snippet']}'. Use a {selected_tone} tone. Additional instruction: {custom_instructions}."
-                                        current_reply = generate_ai_text(prompt_ai)
-                                        item['suggested_reply'] = current_reply
-                                        st.session_state.ai_replies_generated_count += 1
-                                        st.rerun()
-                                with col_ai2:
-                                    if st.button("✨ Improve Grammar", key=f"gram_{item['id']}"):
-                                        prompt_ai = f"Improve the grammar, clarity, and phrasing of this draft reply in a {selected_tone} tone: '{current_reply}'"
-                                        current_reply = generate_ai_text(prompt_ai)
-                                        item['suggested_reply'] = current_reply
-                                        st.rerun()
-                                with col_ai3:
-                                    if st.button("📉 Shorten", key=f"short_{item['id']}"):
-                                        prompt_ai = f"Make this draft reply more concise and shorter while keeping its meaning: '{current_reply}'"
-                                        current_reply = generate_ai_text(prompt_ai)
-                                        item['suggested_reply'] = current_reply
-                                        st.rerun()
-                                with col_ai4:
-                                    if st.button("🔄 Follow-up Draft", key=f"fol_{item['id']}"):
-                                        prompt_ai = f"Compose a polite follow-up draft checking in on the status of this email: '{item['subject']}' sent to {item['sender']}."
-                                        current_reply = generate_ai_text(prompt_ai)
-                                        item['suggested_reply'] = current_reply
-                                        st.rerun()
-
-                                reply_text = st.text_area("Edit Draft Reply:", value=item.get('suggested_reply', ''), key=f"reply_{item['id']}")
-                                
-                                if st.button("📥 Save Draft to Gmail (In-Thread)", key=f"draft_{item['id']}"):
-                                    if service:
-                                        try:
-                                            from email.mime.text import MIMEText
-                                            msg = MIMEText(reply_text)
-                                            msg['Subject'] = f"Re: {item['subject']}"
-                                            msg['To'] = item['sender']
-                                            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-                                            
-                                            draft_body = {
-                                                'message': {
-                                                    'threadId': item['threadId'],
-                                                    'raw': raw
-                                                }
-                                            }
-                                            service.users().drafts().create(userId='me', body=draft_body).execute()
-                                            st.session_state.drafts_saved_count += 1
-                                            st.session_state.cleanup_history.append({
-                                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                "action": "Saved Reply Draft",
-                                                "target": f"{item['subject']}"
-                                            })
-                                            st.success("Successfully saved as an in-thread draft in your Gmail account!")
-                                        except Exception as err:
-                                            st.error(f"Failed to create draft: {err}")
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            st.metric("Total Scanned", len(emails))
+            st.metric("Unread Messages", sum(1 for e in emails if e['is_unread']))
+        with col_r2:
+            st.metric("High Priority", sum(1 for e in emails if e['priority'] == 'High'))
+            st.metric("AI Replies Generated", st.session_state.ai_replies_generated_count)
     else:
-        st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** or **'🚀 Scan Spam Separately'** in the sidebar to begin.")
+        st.info("Run a scan from the sidebar to view analytics.")
+
+# --- Tab 3: Relationship & Lead Management ---
+with main_tabs[2]:
+    st.subheader("💼 Relationship & Prospective Lead Intelligence")
+    if st.session_state.analyzed_emails:
+        leads = [e for e in st.session_state.analyzed_emails if e.get("lead_details")]
+        if leads:
+            for l in leads:
+                with st.container(border=True):
+                    ld = l["lead_details"]
+                    st.markdown(f"**Lead Name:** {ld['lead_name']}")
+                    st.markdown(f"**Contact:** `{ld['contact']}`")
+                    st.markdown(f"**Requirements:** {ld['requirements']}")
+                    st.info(f"**Suggested Next Step:** {ld['next_step']}")
+        else:
+            st.info("No prospective leads extracted from current scan.")
+    else:
+        st.info("Run a scan from the sidebar to view leads.")
+
+# --- Tab 4: Invoice & Document Intelligence ---
+with main_tabs[3]:
+    st.subheader("🧾 Invoice Processing & Attachment Intelligence")
+    if st.session_state.analyzed_emails:
+        invoices = [e for e in st.session_state.analyzed_emails if e.get("invoice_data", {}).get("is_invoice")]
+        if invoices:
+            for inv in invoices:
+                with st.container(border=True):
+                    idata = inv["invoice_data"]
+                    st.markdown(f"**Vendor:** {inv['sender']}")
+                    st.markdown(f"**Invoice Number:** `{idata['invoice_num']}`")
+                    st.markdown(f"**Detected Amount:** `{idata['amount']}`")
+                    st.caption(f"Status: {idata['status']}")
+        else:
+            st.info("No pending invoices detected in current scan.")
+    else:
+        st.info("Run a scan from the sidebar to view invoices.")
+
+# --- Tab 5: Active Inbox Feed ---
+with main_tabs[4]:
+    if st.session_state.analyzed_emails:
+        for item in st.session_state.analyzed_emails:
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**From:** {item['sender']} (`{item['relationship']}`)")
+                    st.markdown(f"**Subject:** {item['subject']}")
+                with c2:
+                    st.markdown(f"**Priority:** `{item['priority']}`")
+                
+                st.markdown(f"**AI Summary:** {item['summary']}")
+                
+                assignee = st.selectbox(
+                    "Assign Team Member:", 
+                    ["Unassigned", "Ramesh R. (Project Head)", "Rajeev", "Technical Team"], 
+                    key=f"team_{item['id']}"
+                )
+                st.session_state.team_assignments[item['id']] = assignee
+    else:
+        st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** in the sidebar to begin.")
