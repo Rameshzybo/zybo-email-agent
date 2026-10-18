@@ -67,7 +67,7 @@ def get_gmail_service():
             
     return build('gmail', 'v1', credentials=creds)
 
-# --- Smart Local Rule Classifier with Expanded Digest & Promo Matching ---
+# --- Smart Local Rule Classifier ---
 def classify_email_locally(subject, sender, snippet, headers, label_ids):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
@@ -160,7 +160,8 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    max_scan_limit = st.slider("Max emails to scan", 50, 1000, 100)
+    # Default set to 100 for optimal performance
+    max_scan_limit = st.slider("Max emails to scan", 10, 500, 100)
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
@@ -172,20 +173,22 @@ with st.sidebar:
 
 # Execute scan
 if run_btn:
-    with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders..."):
+    with st.spinner(f"Scanning up to {max_scan_limit} active emails (excluding Trash)..."):
         service = get_gmail_service()
         if service:
             messages = []
             page_token = None
-            q_query = f"in:anywhere {search_keyword}".strip()
+            # Exclude trash so already deleted items never reappear
+            base_query = search_keyword.strip()
+            q_query = f"-in:trash {base_query}".strip()
 
             try:
                 while len(messages) < max_scan_limit:
-                    fetch_size = min(100, max_scan_limit - len(messages))
+                    fetch_size = min(50, max_scan_limit - len(messages))
                     results = service.users().messages().list(
                         userId='me', 
                         q=q_query, 
-                        includeSpamTrash=True, 
+                        includeSpamTrash=False, # Ignore trash entirely
                         maxResults=fetch_size,
                         pageToken=page_token
                     ).execute()
@@ -220,7 +223,7 @@ if run_btn:
                         classification = classify_email_locally(subject, sender, snippet, headers, label_ids)
                         
                         category = classification["category"]
-                        is_trashed = 'TRASH' in label_ids
+                        is_trashed = False
 
                         email_data = {
                             "id": msg_id,
@@ -239,21 +242,20 @@ if run_btn:
                             "trashed": is_trashed
                         }
 
-                        # Auto-Cleanup Execution with API Rate-Limit Throttling
+                        # Auto-Cleanup Execution
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                        if should_trash and not require_confirmation and not is_trashed:
+                        if should_trash and not require_confirmation:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
-                                # Sleep briefly to prevent Gmail 'Total Query Cost' 403 quota exhaustion
-                                time.sleep(0.4)
+                                time.sleep(0.3)
                             except Exception:
                                 pass
 
                         processed_items.append(email_data)
                         
-                        if idx > 0 and idx % 15 == 0:
-                            time.sleep(0.3)
+                        if idx > 0 and idx % 20 == 0:
+                            time.sleep(0.2)
                             
                     except Exception:
                         continue
