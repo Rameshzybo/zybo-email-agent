@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import io
+import time
 import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -102,12 +103,12 @@ def parse_attachment_content(service, msg_id, part):
         if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
             reader = pypdf.PdfReader(io.BytesIO(file_data))
             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-            return filename, f"[PDF Text Summary]: {text[:500]}..."
+            return filename, f"[PDF Text Summary]: {text[:300]}..."
 
         elif ('word' in mime_type or filename.endswith('.docx')) and docx:
             doc = docx.Document(io.BytesIO(file_data))
             text = "\n".join([p.text for p in doc.paragraphs if p.text])
-            return filename, f"[Word Doc Text]: {text[:500]}..."
+            return filename, f"[Word Doc Text]: {text[:300]}..."
 
         elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
             wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
@@ -117,73 +118,71 @@ def parse_attachment_content(service, msg_id, part):
                 filtered_row = [str(cell) for cell in row if cell is not None]
                 if filtered_row:
                     rows.append(" | ".join(filtered_row))
-            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:10])}..."
+            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5])}..."
 
-        return filename, f"[Attached File]: {filename} ({mime_type})"
+        return filename, f"[Attached File]: {filename}"
     except Exception as e:
-        return filename, f"Failed to parse {filename}: {e}"
+        return filename, f"Attachment parse error"
 
-# --- AI & Rule Analysis ---
-def analyze_email_with_gemini(subject, sender, snippet, thread_text, attachment_summary):
+# --- Smart Local Rule Classifier (Zero API Quota Cost) ---
+def classify_email_locally(subject, sender, snippet):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
+    send_lower = sender.lower()
 
-    if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower:
-        return """Category: Security Alert
-Priority: High
-Reason: Automated website security or firewall notification.
-Action Required: Review Required
-Summary: Security warning requiring monitoring.
-Suggested Reply: Notified technical support for review."""
+    # 1. Security Alerts (Wordfence, Login alerts)
+    if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower or "vulnerability" in sub_lower:
+        return {
+            "category": "Security Alert",
+            "priority": "High",
+            "reason": "Automated website security or firewall notification.",
+            "action_required": "Review Required",
+            "summary": f"Security warning regarding website activity from {sender}.",
+            "suggested_reply": "Thank you. The technical team will review this security alert."
+        }
 
-    if "please moderate" in sub_lower or "new comment" in sub_lower:
-        return """Category: Spam
-Priority: Low
-Reason: Unsolicited WordPress comment moderation notification.
-Action Required: None
-Summary: WordPress comment moderation request.
-Suggested Reply: Automated notification processed."""
+    # 2. Spam & Comment Moderation
+    if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
+        return {
+            "category": "Spam",
+            "priority": "Low",
+            "reason": "Unsolicited WordPress comment moderation notification.",
+            "action_required": "None",
+            "summary": "WordPress comment moderation request.",
+            "suggested_reply": "Automated notification processed."
+        }
 
-    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower:
-        return """Category: Promotional
-Priority: Low
-Reason: Marketing communication or promotional offer.
-Action Required: None
-Summary: Promotional newsletter or discount campaign.
-Suggested Reply: Offers noted."""
+    # 3. Promotional & Marketing
+    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "newsletter" in sub_lower or "promo" in sub_lower:
+        return {
+            "category": "Promotional",
+            "priority": "Low",
+            "reason": "Marketing communication or promotional newsletter.",
+            "action_required": "None",
+            "summary": "Marketing newsletter or promotional offer.",
+            "suggested_reply": "Offers noted."
+        }
 
-    if not GEMINI_API_KEY:
-        return "Category: General\nPriority: Low\nReason: API Key missing\nAction Required: None\nSummary: Gemini API Key missing.\nSuggested Reply: Thank you."
+    # 4. Client Projects
+    if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower or "client" in sub_lower:
+        return {
+            "category": "Client Project",
+            "priority": "High",
+            "reason": "Client website or agency project correspondence.",
+            "action_required": "Reply Needed",
+            "summary": f"Client project communication: {snippet[:100]}...",
+            "suggested_reply": "Hello,\n\nThank you for your update. Ramesh and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
+        }
 
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""
-        Analyze this email and full thread context strictly in this format:
-        Category: [Urgent, Client Project, Security Alert, Promotional, Spam, General]
-        Priority: [High, Medium, Low]
-        Reason: [1 short sentence explaining priority]
-        Action Required: [None, Reply Needed, Review Required, Deadlines]
-        Summary: [Concise summary covering main points and thread history]
-        Suggested Reply: [A professional draft response]
-
-        Sender: {sender}
-        Subject: {subject}
-        Snippet: {snippet}
-        Thread Context: {thread_text[:1000]}
-        Attachment Context: {attachment_summary}
-        """
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-        )
-        return response.text
-    except Exception as e:
-        return f"""Category: General
-Priority: Low
-Reason: Processed via fallback engine due to rate limit ({e}).
-Action Required: None
-Summary: {snippet[:120]}
-Suggested Reply: Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your email and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"""
+    # Default General
+    return {
+        "category": "General",
+        "priority": "Medium",
+        "reason": "Standard correspondence or notification.",
+        "action_required": "None",
+        "summary": snippet[:150] if snippet else "No summary available.",
+        "suggested_reply": "Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your message and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"
+    }
 
 # Initialize session state for persistent results
 if "analyzed_emails" not in st.session_state:
@@ -197,7 +196,6 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    # Increased slider range up to 1000 emails
     max_scan_limit = st.slider("Max emails to scan", 50, 1000, 100)
     
     st.markdown("---")
@@ -210,16 +208,14 @@ with st.sidebar:
 
 # Execute scan
 if run_btn:
-    if not GEMINI_API_KEY:
-        st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
-    else:
-        with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders (Inbox, Spam, Trash)..."):
-            service = get_gmail_service()
-            if service:
-                messages = []
-                page_token = None
-                q_query = f"in:anywhere {search_keyword}".strip()
+    with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders (Inbox, Spam, Trash) without exhausting quotas..."):
+        service = get_gmail_service()
+        if service:
+            messages = []
+            page_token = None
+            q_query = f"in:anywhere {search_keyword}".strip()
 
+            try:
                 while len(messages) < max_scan_limit:
                     fetch_size = min(100, max_scan_limit - len(messages))
                     results = service.users().messages().list(
@@ -238,99 +234,70 @@ if run_btn:
                     page_token = results.get('nextPageToken')
                     if not page_token:
                         break
+            except Exception as e:
+                st.error(f"API Scan Error (Rate limit hit, please wait a moment): {e}")
 
-                if not messages:
-                    st.info("No matching messages found in your account.")
-                    st.session_state.analyzed_emails = []
-                else:
-                    processed_items = []
-                    for msg in messages:
-                        msg_id = msg['id']
-                        try:
-                            txt = service.users().messages().get(userId='me', id=msg_id).execute()
-                            thread_id = txt.get('threadId')
-                            headers = txt.get('payload', {}).get('headers', [])
-                            label_ids = txt.get('labelIds', [])
+            if not messages:
+                st.info("No matching messages found in your account.")
+                st.session_state.analyzed_emails = []
+            else:
+                processed_items = []
+                # Process in batches with small sleep to prevent 403 Total Query Cost limits
+                for idx, msg in enumerate(messages):
+                    msg_id = msg['id']
+                    try:
+                        txt = service.users().messages().get(userId='me', id=msg_id).execute()
+                        headers = txt.get('payload', {}).get('headers', [])
+                        label_ids = txt.get('labelIds', [])
+                        
+                        subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                        sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                        snippet = txt.get('snippet', '')
+
+                        # Classify locally to save API quota
+                        classification = classify_email_locally(subject, sender, snippet)
+                        
+                        category = classification["category"]
+                        if 'SPAM' in label_ids:
+                            category = 'Spread Spam' if False else 'Spam'
+
+                        email_data = {
+                            "id": msg_id,
+                            "sender": sender,
+                            "subject": subject,
+                            "snippet": snippet,
+                            "category": category,
+                            "priority": classification["priority"],
+                            "reason": classification["reason"],
+                            "action_required": classification["action_required"],
+                            "summary": classification["summary"],
+                            "suggested_reply": classification["suggested_reply"],
+                            "attachments": [],
+                            "is_starred": 'STARRED' in label_ids,
+                            "is_unread": 'UNREAD' in label_ids,
+                            "trashed": 'TRASH' in label_ids
+                        }
+
+                        # Auto-Cleanup Execution
+                        should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
+                        if should_trash and not require_confirmation and not email_data["trashed"]:
+                            try:
+                                service.users().messages().trash(userId='me', id=msg_id).execute()
+                                email_data["trashed"] = True
+                            except Exception:
+                                pass
+
+                        processed_items.append(email_data)
+                        
+                        # Throttle every 20 messages to prevent Gmail 403 Total Query Cost limits
+                        if idx > 0 and idx % 20 == 0:
+                            time.sleep(0.5)
                             
-                            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                            snippet = txt.get('snippet', '')
+                    except Exception:
+                        continue
 
-                            thread_text = ""
-                            if thread_id:
-                                thread_resp = service.users().threads().get(userId='me', id=thread_id).execute()
-                                thread_msgs = thread_resp.get('messages', [])
-                                thread_text = "\n".join([m.get('snippet', '') for m in thread_msgs])
-
-                            attachments_info = []
-                            payload = txt.get('payload', {})
-                            parts = payload.get('parts', [])
-                            for part in parts:
-                                if part.get('filename'):
-                                    fname, ftext = parse_attachment_content(service, msg_id, part)
-                                    attachments_info.append(f"{fname}: {ftext}")
-
-                            att_summary = " | ".join(attachments_info) if attachments_info else "None"
-
-                            ai_response = analyze_email_with_gemini(subject, sender, snippet, thread_text, att_summary)
-                            
-                            category = "General"
-                            priority = "Low"
-                            reason = "Routine notification"
-                            action_req = "None"
-                            summary = snippet
-                            suggested_reply = f"Hello,\n\nThank you for reaching out regarding '{subject}'. We will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
-
-                            for line in ai_response.split('\n'):
-                                if "Category:" in line:
-                                    clean_cat = line.replace("Category:", "").strip().replace("[", "").replace("]", "")
-                                    if clean_cat in ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]:
-                                        category = clean_cat
-                                elif "Priority:" in line:
-                                    priority = line.replace("Priority:", "").strip().replace("[", "").replace("]", "")
-                                elif "Reason:" in line:
-                                    reason = line.replace("Reason:", "").strip()
-                                elif "Action Required:" in line:
-                                    action_req = line.replace("Action Required:", "").strip()
-                                elif "Summary:" in line:
-                                    summary = line.replace("Summary:", "").strip()
-                                elif "Suggested Reply:" in line:
-                                    suggested_reply = line.replace("Suggested Reply:", "").strip()
-
-                            if 'SPAM' in label_ids:
-                                category = 'Spam'
-
-                            email_data = {
-                                "id": msg_id,
-                                "sender": sender,
-                                "subject": subject,
-                                "snippet": snippet,
-                                "category": category,
-                                "priority": priority,
-                                "reason": reason,
-                                "action_required": action_req,
-                                "summary": summary,
-                                "suggested_reply": suggested_reply,
-                                "attachments": [a.split(':')[0] for a in attachments_info],
-                                "is_starred": 'STARRED' in label_ids,
-                                "is_unread": 'UNREAD' in label_ids,
-                                "trashed": 'TRASH' in label_ids
-                            }
-
-                            should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                            if should_trash and not require_confirmation and not email_data["trashed"]:
-                                try:
-                                    service.users().messages().trash(userId='me', id=msg_id).execute()
-                                    email_data["trashed"] = True
-                                except Exception:
-                                    pass
-
-                            processed_items.append(email_data)
-                        except Exception:
-                            continue
-
-                    st.session_state.analyzed_emails = processed_items
-                    st.success(f"Successfully processed {len(processed_items)} emails across your account!")
+                st.session_state.analyzed_emails = processed_items
+                st.success(f"Successfully processed {len(processed_items)} emails across your account!")
 
 # Render Dashboard Metrics & Feed
 if st.session_state.analyzed_emails:
@@ -368,8 +335,6 @@ if st.session_state.analyzed_emails:
                         with c1:
                             st.markdown(f"**From:** {item['sender']}")
                             st.markdown(f"**Subject:** {item['subject']}")
-                            if item['attachments']:
-                                st.markdown(f"📎 **Attachments:** `{', '.join(item['attachments'])}`")
                         with c2:
                             prio_color = "red" if item['priority'] == 'High' else ("orange" if item['priority'] == 'Medium' else "green")
                             st.markdown(f"**Priority:** :{prio_color}[{item['priority']}]")
@@ -418,7 +383,7 @@ if st.session_state.analyzed_emails:
                                         st.success("Deleted successfully!")
                                         st.rerun()
                                     except Exception as err:
-                                        st.error(f"Delete Error (Ensure your token has gmail.modify scope): {err}")
+                                        st.error(f"Delete Error (Verify your OAuth token permissions): {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
