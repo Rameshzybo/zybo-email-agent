@@ -35,11 +35,18 @@ def get_gmail_service():
     creds = None
     try:
         if 'GMAIL_TOKEN' in st.secrets:
-            # Load credentials directly from Streamlit Secrets dictionary (bulletproof)
-            token_info = dict(st.secrets['GMAIL_TOKEN'])
+            token_secret = st.secrets['GMAIL_TOKEN']
+            token_info = {
+                "token": token_secret.get("token"),
+                "refresh_token": token_secret.get("refresh_token"),
+                "token_uri": token_secret.get("token_uri", "https://oauth2.googleapis.com/token"),
+                "client_id": token_secret.get("client_id"),
+                "client_secret": token_secret.get("client_secret"),
+                "scopes": list(token_secret.get("scopes", SCOPES)),
+            }
             creds = Credentials.from_authorized_user_info(token_info, SCOPES)
     except Exception as e:
-        st.error(f"Error loading token from secrets: {e}")
+        st.error(f"Error reading token secrets: {e}")
         return None
 
     if not creds or not creds.valid:
@@ -47,7 +54,7 @@ def get_gmail_service():
             try:
                 creds.refresh(Request())
             except Exception as e:
-                st.error(f"Failed to refresh authentication token: {e}")
+                st.error(f"Token refresh failed: {e}")
                 return None
         else:
             st.error("Authentication token is missing or invalid. Please check your Streamlit Secrets configuration.")
