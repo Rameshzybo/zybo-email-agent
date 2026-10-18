@@ -8,10 +8,21 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google import genai
 
-# Attachment Parsers
-import pypdf
-import docx
-import openpyxl
+# Safe Optional Attachment Parsers
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 # Page Configuration
 st.set_page_config(page_title="ZYBO Email Agent Dashboard", page_icon="✉️", layout="wide")
@@ -89,19 +100,19 @@ def parse_attachment_content(service, msg_id, part):
         file_data = base64.urlsafe_b64decode(attachment['data'])
 
         # PDF Extraction
-        if 'pdf' in mime_type or filename.endswith('.pdf'):
+        if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
             reader = pypdf.PdfReader(io.BytesIO(file_data))
             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
             return filename, f"[PDF Text Summary]: {text[:500]}..."
 
         # Word Document Extraction
-        elif 'word' in mime_type or filename.endswith('.docx'):
+        elif ('word' in mime_type or filename.endswith('.docx')) and docx:
             doc = docx.Document(io.BytesIO(file_data))
             text = "\n".join([p.text for p in doc.paragraphs if p.text])
             return filename, f"[Word Doc Text]: {text[:500]}..."
 
         # Excel Spreadsheet Extraction
-        elif 'excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx'):
+        elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
             wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
             sheet = wb.active
             rows = []
@@ -211,7 +222,6 @@ if run_btn:
                 messages = []
                 page_token = None
                 
-                # Query construct based on search bar input
                 q_query = f"in:anywhere {search_keyword}".strip()
 
                 while len(messages) < max_scan_limit:
@@ -249,14 +259,12 @@ if run_btn:
                             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                             snippet = txt.get('snippet', '')
 
-                            # Fetch Thread History
                             thread_text = ""
                             if thread_id:
                                 thread_resp = service.users().threads().get(userId='me', id=thread_id).execute()
                                 thread_msgs = thread_resp.get('messages', [])
                                 thread_text = "\n".join([m.get('snippet', '') for m in thread_msgs])
 
-                            # Parse Attachments
                             attachments_info = []
                             payload = txt.get('payload', {})
                             parts = payload.get('parts', [])
@@ -267,7 +275,6 @@ if run_btn:
 
                             att_summary = " | ".join(attachments_info) if attachments_info else "None"
 
-                            # AI Analysis
                             ai_response = analyze_email_with_gemini(subject, sender, snippet, thread_text, att_summary)
                             
                             category = "General"
@@ -313,7 +320,6 @@ if run_btn:
                                 "trashed": False
                             }
 
-                            # Perform Auto-Cleanup
                             should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                             if should_trash and not require_confirmation and 'TRASH' not in label_ids:
                                 try:
@@ -333,7 +339,6 @@ if run_btn:
 if st.session_state.analyzed_emails:
     emails = st.session_state.analyzed_emails
     
-    # Metrics Row
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.metric("Total Scanned", len(emails))
@@ -349,7 +354,6 @@ if st.session_state.analyzed_emails:
 
     st.markdown("---")
 
-    # Tabs for Categorization
     tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
     bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
     
@@ -380,7 +384,6 @@ if st.session_state.analyzed_emails:
                         if item['trashed']:
                             st.error("🗑️ *Automatically moved to Trash.*")
 
-                        # Gmail Label & Action Buttons
                         btn_col1, btn_col2, btn_col3 = st.columns(3)
                         service = get_gmail_service()
                         
@@ -408,7 +411,6 @@ if st.session_state.analyzed_emails:
                                     service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
                                     st.success("Archived from Inbox!")
 
-                        # Expandable Section for AI Reply & Draft creation
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
                             if st.button("📥 Save Draft to Gmail", key=f"draft_{item['id']}"):
