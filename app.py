@@ -1,124 +1,96 @@
-    category_options = ["All"] + sorted(
-        {e.get("analysis", {}).get("category", "General") for e in emails}
-    )
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        category_filter = st.selectbox("Filter by category", category_options)
-    with filter_col2:
-        priority_filter = st.selectbox("Filter by priority", ["All", "High", "Medium", "Low"])
+import base64
+import json
+import os
+from datetime import datetime
+from email.mime.text import MIMEText
 
-    filtered = []
-    for email in emails:
-        analysis = email.get("analysis", {})
-        if category_filter != "All" and analysis.get("category") != category_filter:
-            continue
-        if priority_filter != "All" and analysis.get("priority") != priority_filter:
-            continue
-        filtered.append(email)
-
-    if not filtered:
-        st.info("No emails match these filters.")
-
-    for email in filtered:
-        analysis = email.get("analysis", {})
-        title = email.get("subject", "(No subject)")
-        category = analysis.get("category", "General")
-        priority = analysis.get("priority", "Medium")
-        with st.container(border=True):
-            top1, top2 = st.columns([5, 1])
-            with top1:
-                st.markdown(f"**{title}**")
-                st.caption(f"From: {email.get('sender', 'Unknown')} · {email.get('date', '')}")
-            with top2:
-                st.markdown(f"**{priority} priority**")
-                st.caption(category)
-
-            st.write(analysis.get("summary", email.get("snippet", "")))
-            if analysis.get("action_required"):
-                st.markdown("**Action needed:** " + ", ".join(analysis.get("action_items", [])))
-            if analysis.get("deadline"):
-                st.markdown(f"**Deadline:** {analysis['deadline']}")
-            st.caption(
-                f"AI confidence: {analysis.get('confidence', 'Low')} · "
-                f"Next step: {analysis.get('suggested_next_step', 'Review manually')}"
-            )
-            if email.get("trashed"):
-                st.warning("Moved to Trash by the enabled cleanup rule.")
-
-            b1, b2, b3 = st.columns([1, 1, 2])
-            with b1:
-                if st.button("Read full email", key=f"read_{email['id']}"):
-                    st.session_state.selected_email_id = email["id"]
-            with b2:
-                if st.button("Draft a reply", key=f"reply_{email['id']}"):
-                    st.session_state.selected_email_id = email["id"]
-                    st.session_state[f"make_reply_{email['id']}"] = True
-            with b3:
-                if email.get("id") and st.button(
-                    "Open in Gmail",
-                    key=f"gmail_{email['id']}",
-                    help="Opens Gmail in a new browser tab.",
-                ):
-                    st.link_button(
-                        "Open Gmail",
-                        f"https://mail.google.com/mail/u/0/#all/{email['id']}",
-                        use_container_width=False,
-                    )
+import streamlit as st
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google import genai
 
 # ---------------------------------------------------------
-# SELECTED EMAIL DETAIL AND DRAFT
+# ZYBO AI EMAIL AGENT
 # ---------------------------------------------------------
-selected_id = st.session_state.selected_email_id
-selected = next((e for e in emails if e.get("id") == selected_id), None)
+st.set_page_config(page_title="ZYBO AI Email Agent", page_icon="✉️", layout="wide")
 
-if selected:
-    st.divider()
-    st.subheader("✍️ Email detail & reply workspace")
-    st.markdown(f"**Subject:** {selected.get('subject', '')}")
-    st.markdown(f"**From:** {selected.get('sender', '')}")
-    with st.expander("Read full email", expanded=True):
-        st.text(selected.get("body") or selected.get("snippet") or "(No readable body found.)")
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+GEMINI_MODEL = "gemini-2.5-flash"
 
-    draft_key = f"reply_text_{selected['id']}"
-    if st.button("✨ Generate reply with Gemini", key=f"generate_{selected['id']}"):
-        try:
-            with st.spinner("Drafting a contextual reply..."):
-                reply = generate_reply(
-                    selected, reply_tone, extra_reply_instructions
-                )
-            st.session_state[draft_key] = reply
-        except Exception as exc:
-            st.error(f"Reply generation failed: {exc}")
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-    reply_text = st.text_area(
-        "Edit your reply before saving it to Gmail",
-        key=draft_key,
-        height=220,
-        placeholder="Generate a reply or write your own...",
-    )
-    st.caption("This creates a Gmail draft only. It does not send the email.")
+st.title("✉️ ZYBO AI Email Agent")
+st.caption("AI inbox intelligence, email summaries, reply drafting, follow-up detection, and controlled cleanup.")
 
-    save_col, close_col = st.columns([1, 1])
-    with save_col:
-        if st.button("💾 Save as Gmail draft", type="primary", key=f"save_draft_{selected['id']}"):
-            if not reply_text.strip():
-                st.warning("Write or generate a reply first.")
+# ---------------------------------------------------------
+# AUTHENTICATION
+# ---------------------------------------------------------
+def get_gmail_service():
+    """Build Gmail service from a token stored in Streamlit secrets."""
+    if "GMAIL_TOKEN" not in st.secrets:
+        st.error("Missing [GMAIL_TOKEN] in Streamlit Secrets.")
+        return None
+
+    try:
+        token_secret = st.secrets["GMAIL_TOKEN"]
+        token_info = {
+            "token": token_secret.get("token"),
+            "refresh_token": token_secret.get("refresh_token"),
+            "token_uri": token_secret.get(
+                "token_uri", "https://oauth2.googleapis.com/token"
+            ),
+            "client_id": token_secret.get("client_id"),
+            "client_secret": token_secret.get("client_secret"),
+            "scopes": list(token_secret.get("scopes", SCOPES)),
+        }
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                # Note: the refreshed token is held in memory only. For long-term
+                # use, persist token updates securely per connected user.
             else:
-                service = get_gmail_service()
-                if service:
-                    try:
-                        draft = create_gmail_draft(service, selected, reply_text.strip())
-                        st.session_state.drafts_created.add(draft.get("id", selected["id"]))
-                        st.success("Draft saved to Gmail. Open your Drafts folder to review it.")
-                    except Exception as exc:
-                        st.error(f"Could not create Gmail draft: {exc}")
-    with close_col:
-        if st.button("Close email workspace", key=f"close_{selected['id']}"):
-            st.session_state.selected_email_id = None
-            st.rerun()
+                st.error("Gmail token is invalid or expired. Re-authorize Gmail.")
+                return None
 
-st.divider()
-st.caption(
-    "Safety note: AI classifications can be wrong. Automatic cleanup is disabled by default; "
-    "test with a small batch before enabling it. This app creates drafts and does not auto-send replies."
-)
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    except Exception as exc:
+        st.error(f"Gmail authentication failed: {exc}")
+        return None
+
+
+def get_gemini_client():
+    if not GEMINI_API_KEY:
+        return None
+    return genai.Client(api_key=GEMINI_API_KEY)
+
+
+# ---------------------------------------------------------
+# EMAIL PARSING
+# ---------------------------------------------------------
+def decode_part(data):
+    if not data:
+        return ""
+    try:
+        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode(
+            "utf-8", errors="replace"
+        )
+    except Exception:
+        return ""
+
+
+def collect_body(payload):
+    """Extract readable plain-text body from Gmail's nested MIME payload."""
+    plain_parts = []
+    html_parts = []
+
+    def walk(part):
+        mime_type = part.get("mimeType", "")
+        body_data = (part.get("body") or {}).get("data")
+        if body_data:
+            content = decode_part(body_data)
+            if mime_type == "text/plain":
+                plain_parts.append(content)
