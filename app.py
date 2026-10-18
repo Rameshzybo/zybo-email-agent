@@ -1,214 +1,124 @@
-import json
-import os
-import streamlit as st
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from google import genai
+    category_options = ["All"] + sorted(
+        {e.get("analysis", {}).get("category", "General") for e in emails}
+    )
+    filter_col1, filter_col2 = st.columns(2)
+    with filter_col1:
+        category_filter = st.selectbox("Filter by category", category_options)
+    with filter_col2:
+        priority_filter = st.selectbox("Filter by priority", ["All", "High", "Medium", "Low"])
 
-# Page Configuration
-st.set_page_config(page_title="ZYBO Email Agent", page_icon="✉️", layout="wide")
+    filtered = []
+    for email in emails:
+        analysis = email.get("analysis", {})
+        if category_filter != "All" and analysis.get("category") != category_filter:
+            continue
+        if priority_filter != "All" and analysis.get("priority") != priority_filter:
+            continue
+        filtered.append(email)
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+    if not filtered:
+        st.info("No emails match these filters.")
 
-# Securely load Gemini API Key
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    for email in filtered:
+        analysis = email.get("analysis", {})
+        title = email.get("subject", "(No subject)")
+        category = analysis.get("category", "General")
+        priority = analysis.get("priority", "Medium")
+        with st.container(border=True):
+            top1, top2 = st.columns([5, 1])
+            with top1:
+                st.markdown(f"**{title}**")
+                st.caption(f"From: {email.get('sender', 'Unknown')} · {email.get('date', '')}")
+            with top2:
+                st.markdown(f"**{priority} priority**")
+                st.caption(category)
 
-# Automatically generate credentials.json on the fly for cloud OAuth client setup
-if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets:
-    creds_dict = dict(st.secrets['GOOGLE_CREDENTIALS'])
-    full_creds = {
-        "installed": {
-            "client_id": creds_dict.get("client_id"),
-            "project_id": creds_dict.get("project_id"),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_secret": creds_dict.get("client_secret"),
-            "redirect_uris": ["http://localhost"]
-        }
-    }
-    with open('credentials.json', 'w') as f:
-        json.dump(full_creds, f)
+            st.write(analysis.get("summary", email.get("snippet", "")))
+            if analysis.get("action_required"):
+                st.markdown("**Action needed:** " + ", ".join(analysis.get("action_items", [])))
+            if analysis.get("deadline"):
+                st.markdown(f"**Deadline:** {analysis['deadline']}")
+            st.caption(
+                f"AI confidence: {analysis.get('confidence', 'Low')} · "
+                f"Next step: {analysis.get('suggested_next_step', 'Review manually')}"
+            )
+            if email.get("trashed"):
+                st.warning("Moved to Trash by the enabled cleanup rule.")
 
-def get_gmail_service():
-    if 'GMAIL_TOKEN' not in st.secrets:
-        st.error("The [GMAIL_TOKEN] section is missing from your Streamlit Cloud Secrets.")
-        return None
+            b1, b2, b3 = st.columns([1, 1, 2])
+            with b1:
+                if st.button("Read full email", key=f"read_{email['id']}"):
+                    st.session_state.selected_email_id = email["id"]
+            with b2:
+                if st.button("Draft a reply", key=f"reply_{email['id']}"):
+                    st.session_state.selected_email_id = email["id"]
+                    st.session_state[f"make_reply_{email['id']}"] = True
+            with b3:
+                if email.get("id") and st.button(
+                    "Open in Gmail",
+                    key=f"gmail_{email['id']}",
+                    help="Opens Gmail in a new browser tab.",
+                ):
+                    st.link_button(
+                        "Open Gmail",
+                        f"https://mail.google.com/mail/u/0/#all/{email['id']}",
+                        use_container_width=False,
+                    )
 
-    creds = None
-    try:
-        token_secret = st.secrets['GMAIL_TOKEN']
-        token_info = {
-            "token": token_secret.get("token"),
-            "refresh_token": token_secret.get("refresh_token"),
-            "token_uri": token_secret.get("token_uri", "https://oauth2.googleapis.com/token"),
-            "client_id": token_secret.get("client_id"),
-            "client_secret": token_secret.get("client_secret"),
-            "scopes": list(token_secret.get("scopes", SCOPES)),
-        }
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
-    except Exception as e:
-        st.error(f"Error reading token secrets: {e}")
-        return None
+# ---------------------------------------------------------
+# SELECTED EMAIL DETAIL AND DRAFT
+# ---------------------------------------------------------
+selected_id = st.session_state.selected_email_id
+selected = next((e for e in emails if e.get("id") == selected_id), None)
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                st.error(f"Token refresh failed: {e}")
-                return None
-        else:
-            st.error("Authentication token is invalid or expired.")
-            return None
-            
-    return build('gmail', 'v1', credentials=creds)
+if selected:
+    st.divider()
+    st.subheader("✍️ Email detail & reply workspace")
+    st.markdown(f"**Subject:** {selected.get('subject', '')}")
+    st.markdown(f"**From:** {selected.get('sender', '')}")
+    with st.expander("Read full email", expanded=True):
+        st.text(selected.get("body") or selected.get("snippet") or "(No readable body found.)")
 
-def analyze_email_with_gemini(subject, sender, snippet):
-    if not GEMINI_API_KEY:
-        return "Category: General\nSummary: Gemini API Key missing."
-    
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""
-        Analyze this email and strictly follow this output format:
-        Category: [Urgent, Client Project, Security Alert, Promotional, Spam, General]
-        Summary: [1-sentence summary]
-        
-        Sender: {sender}
-        Subject: {subject}
-        Snippet: {snippet}
-        """
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        return response.text
-    except Exception as e:
-        return f"Category: General\nSummary: AI processing error ({e})"
+    draft_key = f"reply_text_{selected['id']}"
+    if st.button("✨ Generate reply with Gemini", key=f"generate_{selected['id']}"):
+        try:
+            with st.spinner("Drafting a contextual reply..."):
+                reply = generate_reply(
+                    selected, reply_tone, extra_reply_instructions
+                )
+            st.session_state[draft_key] = reply
+        except Exception as exc:
+            st.error(f"Reply generation failed: {exc}")
 
-# --- UI Layout ---
-st.title("✉️ ZYBO AI Email Agent")
-st.markdown("Automated Inbox Categorization, Spam/Promo Cleanup & Summary Dashboard powered by Gemini.")
+    reply_text = st.text_area(
+        "Edit your reply before saving it to Gmail",
+        key=draft_key,
+        height=220,
+        placeholder="Generate a reply or write your own...",
+    )
+    st.caption("This creates a Gmail draft only. It does not send the email.")
 
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    st.subheader("Controls")
-    max_scan_limit = st.slider("Max emails to scan per run", 10, 200, 50)
-    
-    # Auto-cleanup toggles
-    auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=True)
-    auto_trash_promo = st.checkbox("🗑️ Automatically trash Promotional emails", value=True)
-    
-    run_btn = st.button("🚀 Fetch, Sort & Clean All Mail", type="primary")
-
-with col2:
-    st.subheader("Live Categorized Feed")
-    if run_btn:
-        if not GEMINI_API_KEY:
-            st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
-        else:
-            with st.spinner("Scanning all folders (including Spam), analyzing via Gemini, and cleaning..."):
+    save_col, close_col = st.columns([1, 1])
+    with save_col:
+        if st.button("💾 Save as Gmail draft", type="primary", key=f"save_draft_{selected['id']}"):
+            if not reply_text.strip():
+                st.warning("Write or generate a reply first.")
+            else:
                 service = get_gmail_service()
                 if service:
-                    messages = []
-                    page_token = None
-                    
-                    # Fetch messages across ALL folders with pagination up to max_scan_limit
-                    while len(messages) < max_scan_limit:
-                        results = service.users().messages().list(
-                            userId='me', 
-                            q='', 
-                            includeSpamTrash=True, # Critical to pull from Spam and Trash
-                            maxResults=min(50, max_scan_limit - len(messages)),
-                            pageToken=page_token
-                        ).execute()
-                        
-                        batch = results.get('messages', [])
-                        if not batch:
-                            break
-                        messages.extend(batch)
-                        
-                        page_token = results.get('nextPageToken')
-                        if not page_token:
-                            break
+                    try:
+                        draft = create_gmail_draft(service, selected, reply_text.strip())
+                        st.session_state.drafts_created.add(draft.get("id", selected["id"]))
+                        st.success("Draft saved to Gmail. Open your Drafts folder to review it.")
+                    except Exception as exc:
+                        st.error(f"Could not create Gmail draft: {exc}")
+    with close_col:
+        if st.button("Close email workspace", key=f"close_{selected['id']}"):
+            st.session_state.selected_email_id = None
+            st.rerun()
 
-                    if not messages:
-                        st.info("No messages found in your mailbox.")
-                    else:
-                        st.success(f"Successfully fetched and processed {len(messages)} total email(s).")
-                        
-                        categorized_bins = {
-                            "Urgent": [],
-                            "Client Project": [],
-                            "Security Alert": [],
-                            "General": [],
-                            "Promotional": [],
-                            "Spam": []
-                        }
-
-                        for msg in messages:
-                            msg_id = msg['id']
-                            try:
-                                txt = service.users().messages().get(userId='me', id=msg_id).execute()
-                                headers = txt.get('payload', {}).get('headers', [])
-                                
-                                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                                snippet = txt.get('snippet', '')
-
-                                ai_response = analyze_email_with_gemini(subject, sender, snippet)
-                                
-                                category = "General"
-                                summary = ai_response
-                                for line in ai_response.split('\n'):
-                                    if "Category:" in line:
-                                        clean_cat = line.replace("Category:", "").strip().replace("[", "").replace("]", "")
-                                        if clean_cat in categorized_bins:
-                                            category = clean_cat
-                                    elif "Summary:" in line:
-                                        summary = line.replace("Summary:", "").strip()
-
-                                email_data = {
-                                    "id": msg_id,
-                                    "sender": sender,
-                                    "subject": subject,
-                                    "snippet": snippet,
-                                    "summary": summary,
-                                    "trashed": False
-                                }
-
-                                # Handle Trash Action for Spam or Promotional items
-                                if (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo):
-                                    try:
-                                        service.users().messages().trash(userId='me', id=msg_id).execute()
-                                        email_data["trashed"] = True
-                                    except Exception as trash_err:
-                                        email_data["trashed"] = False
-
-                                categorized_bins[category].append(email_data)
-                            except Exception:
-                                continue
-
-                        tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
-                        
-                        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
-                        for i, tab in enumerate(tabs):
-                            current_cat = bin_keys[i]
-                            items = categorized_bins[current_cat]
-                            
-                            with tab:
-                                if not items:
-                                    st.info(f"No emails in this category.")
-                                else:
-                                    for item in items:
-                                        with st.container(border=True):
-                                            st.markdown(f"**From:** {item['sender']}")
-                                            st.markdown(f"**Subject:** {item['subject']}")
-                                            st.markdown(f"**Snippet:** _{item['snippet']}_")
-                                            st.markdown("---")
-                                            st.markdown(f"**AI Summary:** {item['summary']}")
-                                            if item['trashed']:
-                                                st.error(f"🗑️ *Successfully moved to Trash (identified as {current_cat}).*")
+st.divider()
+st.caption(
+    "Safety note: AI classifications can be wrong. Automatic cleanup is disabled by default; "
+    "test with a small batch before enabling it. This app creates drafts and does not auto-send replies."
+)
