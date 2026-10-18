@@ -96,7 +96,7 @@ col1, col2 = st.columns([1, 3])
 
 with col1:
     st.subheader("Controls")
-    max_emails = st.slider("Number of emails to scan", 1, 30, 15)
+    max_scan_limit = st.slider("Max emails to scan per run", 10, 200, 50)
     
     # Auto-cleanup toggles
     auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=True)
@@ -110,17 +110,35 @@ with col2:
         if not GEMINI_API_KEY:
             st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
         else:
-            with st.spinner("Scanning inbox, spam folder, analyzing via Gemini, and cleaning..."):
+            with st.spinner("Scanning all folders (including Spam), analyzing via Gemini, and cleaning..."):
                 service = get_gmail_service()
                 if service:
-                    # Query 'in:all' searches across Inbox, Spam, and Archives to capture everything
-                    results = service.users().messages().list(userId='me', q='in:all', maxResults=max_emails).execute()
-                    messages = results.get('messages', [])
+                    messages = []
+                    page_token = None
+                    
+                    # Fetch messages across ALL folders with pagination up to max_scan_limit
+                    while len(messages) < max_scan_limit:
+                        results = service.users().messages().list(
+                            userId='me', 
+                            q='', 
+                            includeSpamTrash=True, # Critical to pull from Spam and Trash
+                            maxResults=min(50, max_scan_limit - len(messages)),
+                            pageToken=page_token
+                        ).execute()
+                        
+                        batch = results.get('messages', [])
+                        if not batch:
+                            break
+                        messages.extend(batch)
+                        
+                        page_token = results.get('nextPageToken')
+                        if not page_token:
+                            break
 
                     if not messages:
                         st.info("No messages found in your mailbox.")
                     else:
-                        st.success(f"Successfully processed {len(messages)} email(s) across your account.")
+                        st.success(f"Successfully fetched and processed {len(messages)} total email(s).")
                         
                         categorized_bins = {
                             "Urgent": [],
@@ -167,7 +185,7 @@ with col2:
                                     try:
                                         service.users().messages().trash(userId='me', id=msg_id).execute()
                                         email_data["trashed"] = True
-                                    except Exception:
+                                    except Exception as trash_err:
                                         email_data["trashed"] = False
 
                                 categorized_bins[category].append(email_data)
@@ -193,4 +211,4 @@ with col2:
                                             st.markdown("---")
                                             st.markdown(f"**AI Summary:** {item['summary']}")
                                             if item['trashed']:
-                                                st.error(f"🗑️ *Automatically moved to Trash (identified as {current_cat}).*")
+                                                st.error(f"🗑️ *Successfully moved to Trash (identified as {current_cat}).*")
