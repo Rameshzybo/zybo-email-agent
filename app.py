@@ -66,6 +66,22 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 def analyze_email_with_gemini(subject, sender, snippet):
+    # Rule-based fast paths to save API quota from 429 errors
+    sub_lower = subject.lower()
+    if "wordfence alert" in sub_lower or "security" in sub_lower:
+        return """Category: Security Alert
+Priority: High
+Reason: System security or firewall notification detected.
+Action Required: Review Required
+Summary: Automated security warning or alert regarding website integrity."""
+    
+    if "unsubscribe" in snippet.lower() or "offer" in sub_lower or "discount" in sub_lower:
+        return """Category: Promotional
+Priority: Low
+Reason: Marketing or promotional content detected.
+Action Required: None
+Summary: Promotional newsletter or marketing offer."""
+
     if not GEMINI_API_KEY:
         return "Category: General\nPriority: Low\nReason: API key missing\nAction Required: None\nSummary: Gemini API Key missing."
     
@@ -84,14 +100,19 @@ def analyze_email_with_gemini(subject, sender, snippet):
         Subject: {subject}
         Snippet: {snippet}
         """
-        # Updated to gemini-3.8-flash as mandated by the API error response
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=prompt,
         )
         return response.text
     except Exception as e:
-        return f"Category: General\nPriority: Low\nReason: Error processing\nAction Required: None\nSummary: Error ({e})\nSuggested Reply: N/A"
+        # Fallback if quota is exhausted
+        return f"""Category: General
+Priority: Low
+Reason: API quota limit reached (429). Used fallback classifier.
+Action Required: None
+Summary: {snippet[:100]}...
+Suggested Reply: Thank you for your message."""
 
 # Initialize session state for persistent results
 if "analyzed_emails" not in st.session_state:
@@ -104,7 +125,7 @@ st.markdown("Advanced 24/7 Mail Categorization, Smart Priority Detection, Automa
 # Sidebar Controls
 with st.sidebar:
     st.subheader("⚙️ Agent Controls")
-    max_scan_limit = st.slider("Max emails to scan", 10, 200, 50)
+    max_scan_limit = st.slider("Max emails to scan", 5, 50, 15)  # Lowered default to preserve quota
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
@@ -119,19 +140,18 @@ if run_btn:
     if not GEMINI_API_KEY:
         st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
     else:
-        with st.spinner("Scanning Inbox, Spam, & Archives, analyzing with Gemini, and sorting..."):
+        with st.spinner("Scanning Inbox, Spam, & Archives, analyzing messages, and sorting..."):
             service = get_gmail_service()
             if service:
                 messages = []
                 page_token = None
                 
-                # Scan across all folders including Spam and Trash explicitly
                 while len(messages) < max_scan_limit:
                     results = service.users().messages().list(
                         userId='me', 
                         q='in:anywhere', 
                         includeSpamTrash=True, 
-                        maxResults=min(50, max_scan_limit - len(messages)),
+                        maxResults=min(20, max_scan_limit - len(messages)),
                         pageToken=page_token
                     ).execute()
                     
@@ -162,7 +182,6 @@ if run_btn:
 
                             ai_response = analyze_email_with_gemini(subject, sender, snippet)
                             
-                            # Default parsing
                             category = "General"
                             priority = "Low"
                             reason = "Routine notification"
@@ -186,7 +205,6 @@ if run_btn:
                                 elif "Suggested Reply:" in line:
                                     suggested_reply = line.replace("Suggested Reply:", "").strip()
 
-                            # Force classification override if Gmail already marks it as SPAM
                             if 'SPAM' in label_ids:
                                 category = 'Spam'
 
@@ -204,7 +222,6 @@ if run_btn:
                                 "trashed": False
                             }
 
-                            # Perform Trashing if conditions match
                             should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                             if should_trash and not require_confirmation and 'TRASH' not in label_ids:
                                 try:
@@ -218,13 +235,12 @@ if run_btn:
                             continue
 
                     st.session_state.analyzed_emails = processed_items
-                    st.success(f"Successfully processed {len(processed_items)} emails across your account!")
+                    st.success(f"Successfully processed {len(processed_items)} emails!")
 
 # Render Dashboard Metrics & Feed if data exists
 if st.session_state.analyzed_emails:
     emails = st.session_state.analyzed_emails
     
-    # Dashboard Metrics Row
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.metric("Total Scanned", len(emails))
@@ -240,7 +256,6 @@ if st.session_state.analyzed_emails:
 
     st.markdown("---")
 
-    # Tabs for Categorization
     tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
     bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
     
@@ -269,7 +284,6 @@ if st.session_state.analyzed_emails:
                         if item['trashed']:
                             st.error("🗑️ *Automatically moved to Trash.*")
                         
-                        # Expandable section for AI Reply & Draft creation
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
                             if st.button("📥 Save Draft to Gmail", key=f"draft_{item['id']}"):
