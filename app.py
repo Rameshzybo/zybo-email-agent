@@ -96,7 +96,7 @@ col1, col2 = st.columns([1, 3])
 
 with col1:
     st.subheader("Controls")
-    max_emails = st.slider("Number of emails to scan", 1, 15, 5)
+    max_emails = st.slider("Number of emails to scan", 1, 20, 10)
     auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=False)
     run_btn = st.button("🚀 Fetch, Sort & Clean Inbox", type="primary")
 
@@ -109,13 +109,14 @@ with col2:
             with st.spinner("Connecting to Gmail, analyzing via Gemini, and sorting..."):
                 service = get_gmail_service()
                 if service:
-                    results = service.users().messages().list(userId='me', q='label:unread', maxResults=max_emails).execute()
+                    # Removed 'label:unread' filter to scan recent messages across all folders (including Spam)
+                    results = service.users().messages().list(userId='me', q='', maxResults=max_emails).execute()
                     messages = results.get('messages', [])
 
                     if not messages:
-                        st.info("No unread messages found in your mailbox.")
+                        st.info("No messages found in your mailbox.")
                     else:
-                        st.success(f"Successfully processed {len(messages)} unread email(s).")
+                        st.success(f"Successfully processed {len(messages)} email(s).")
                         
                         categorized_bins = {
                             "Urgent": [],
