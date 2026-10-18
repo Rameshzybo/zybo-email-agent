@@ -99,19 +99,16 @@ def parse_attachment_content(service, msg_id, part):
         ).execute()
         file_data = base64.urlsafe_b64decode(attachment['data'])
 
-        # PDF Extraction
         if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
             reader = pypdf.PdfReader(io.BytesIO(file_data))
             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
             return filename, f"[PDF Text Summary]: {text[:500]}..."
 
-        # Word Document Extraction
         elif ('word' in mime_type or filename.endswith('.docx')) and docx:
             doc = docx.Document(io.BytesIO(file_data))
             text = "\n".join([p.text for p in doc.paragraphs if p.text])
             return filename, f"[Word Doc Text]: {text[:500]}..."
 
-        # Excel Spreadsheet Extraction
         elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
             wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
             sheet = wb.active
@@ -131,7 +128,6 @@ def analyze_email_with_gemini(subject, sender, snippet, thread_text, attachment_
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
 
-    # Rule-Based Fast Paths (Saves Gemini Daily Quota)
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower:
         return """Category: Security Alert
 Priority: High
@@ -167,7 +163,7 @@ Suggested Reply: Offers noted."""
         Priority: [High, Medium, Low]
         Reason: [1 short sentence explaining priority]
         Action Required: [None, Reply Needed, Review Required, Deadlines]
-        Summary: [Concise summary covering the main points and thread history]
+        Summary: [Concise summary covering main points and thread history]
         Suggested Reply: [A professional draft response]
 
         Sender: {sender}
@@ -201,7 +197,7 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    max_scan_limit = st.slider("Max emails to scan", 5, 100, 20)
+    max_scan_limit = st.slider("Max emails to scan", 5, 200, 50)
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
@@ -221,7 +217,6 @@ if run_btn:
             if service:
                 messages = []
                 page_token = None
-                
                 q_query = f"in:anywhere {search_keyword}".strip()
 
                 while len(messages) < max_scan_limit:
@@ -229,7 +224,7 @@ if run_btn:
                         userId='me', 
                         q=q_query, 
                         includeSpamTrash=True, 
-                        maxResults=min(20, max_scan_limit - len(messages)),
+                        maxResults=min(50, max_scan_limit - len(messages)),
                         pageToken=page_token
                     ).execute()
                     
@@ -317,11 +312,11 @@ if run_btn:
                                 "attachments": [a.split(':')[0] for a in attachments_info],
                                 "is_starred": 'STARRED' in label_ids,
                                 "is_unread": 'UNREAD' in label_ids,
-                                "trashed": False
+                                "trashed": 'TRASH' in label_ids
                             }
 
                             should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                            if should_trash and not require_confirmation and 'TRASH' not in label_ids:
+                            if should_trash and not require_confirmation and not email_data["trashed"]:
                                 try:
                                     service.users().messages().trash(userId='me', id=msg_id).execute()
                                     email_data["trashed"] = True
@@ -382,9 +377,10 @@ if st.session_state.analyzed_emails:
                         st.caption(f"Reason: {item['reason']}")
                         
                         if item['trashed']:
-                            st.error("🗑️ *Automatically moved to Trash.*")
+                            st.error("🗑️ *Moved to Trash.*")
 
-                        btn_col1, btn_col2, btn_col3 = st.columns(3)
+                        # Action Buttons (Star, Mark Read, Archive, Delete)
+                        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
                         service = get_gmail_service()
                         
                         with btn_col1:
@@ -397,7 +393,7 @@ if st.session_state.analyzed_emails:
                                     st.rerun()
 
                         with btn_col2:
-                            read_label = "✉️ Mark Unread" if not item['is_unread'] else "📩 Mark Read"
+                            read_label = "✉️ Unread" if not item['is_unread'] else "📩 Read"
                             if st.button(read_label, key=f"read_{item['id']}"):
                                 if service:
                                     body = {'addLabelIds': ['UNREAD']} if not item['is_unread'] else {'removeLabelIds': ['UNREAD']}
@@ -406,10 +402,21 @@ if st.session_state.analyzed_emails:
                                     st.rerun()
 
                         with btn_col3:
-                            if st.button("📥 Archive Email", key=f"arch_{item['id']}"):
+                            if st.button("📥 Archive", key=f"arch_{item['id']}"):
                                 if service:
                                     service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
-                                    st.success("Archived from Inbox!")
+                                    st.success("Archived!")
+
+                        with btn_col4:
+                            if st.button("🗑️ Delete", key=f"del_{item['id']}"):
+                                if service:
+                                    try:
+                                        service.users().messages().trash(userId='me', id=item['id']).execute()
+                                        item['trashed'] = True
+                                        st.success("Deleted successfully!")
+                                        st.rerun()
+                                    except Exception as err:
+                                        st.error(f"Error: {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
