@@ -30,10 +30,8 @@ except ImportError:
 # Page Configuration
 st.set_page_config(page_title="ZYBO AI Email Agent Dashboard", page_icon="✉️", layout="wide")
 
-SCOPES = [
-    'https://www.googleapis.com/auth/gmail.modify',
-    'https://www.googleapis.com/auth/calendar.events'
-]
+# Standard Scope for Email Actions
+SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 # Securely load Gemini API Key
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -63,15 +61,18 @@ def get_gmail_service():
     creds = None
     try:
         token_secret = st.secrets['GMAIL_TOKEN']
+        # Use scopes stored in token secret if available, otherwise default to SCOPES
+        saved_scopes = list(token_secret.get("scopes", SCOPES))
+        
         token_info = {
             "token": token_secret.get("token"),
             "refresh_token": token_secret.get("refresh_token"),
             "token_uri": token_secret.get("token_uri", "https://oauth2.googleapis.com/token"),
             "client_id": token_secret.get("client_id"),
             "client_secret": token_secret.get("client_secret"),
-            "scopes": list(token_secret.get("scopes", SCOPES)),
+            "scopes": saved_scopes,
         }
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        creds = Credentials.from_authorized_user_info(token_info, saved_scopes)
     except Exception as e:
         st.error(f"Error reading token secrets: {e}")
         return None
@@ -91,7 +92,7 @@ def get_gmail_service():
 
 def get_calendar_service():
     service = get_gmail_service()
-    if service:
+    if service and hasattr(service, '_http'):
         try:
             return build('calendar', 'v3', credentials=service._http.credentials)
         except Exception:
@@ -628,7 +629,7 @@ if st.session_state.analyzed_emails:
                                         cal_service.events().insert(calendarId='primary', body=event).execute()
                                         st.success("Meeting event added to Google Calendar!")
                                     except Exception as cal_err:
-                                        st.error(f"Calendar error: {cal_err}")
+                                        st.error(f"Calendar error (Ensure calendar.events scope is granted): {cal_err}")
 
                         if item['trashed']:
                             st.error("🗑️ *Moved to Trash (Synced with Gmail).*")
