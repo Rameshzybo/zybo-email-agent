@@ -73,7 +73,7 @@ def analyze_email_with_gemini(subject, sender, snippet):
         client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = f"""
         Analyze this email and strictly follow this output format:
-        Category: [Urgent, Client Project, Security Alert, Spam, General]
+        Category: [Urgent, Client Project, Security Alert, Promotional, Spam, General]
         Summary: [1-sentence summary]
         
         Sender: {sender}
@@ -90,15 +90,19 @@ def analyze_email_with_gemini(subject, sender, snippet):
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent")
-st.markdown("Automated Inbox Categorization, Cleanup & Summary Dashboard powered by Gemini.")
+st.markdown("Automated Inbox Categorization, Spam/Promo Cleanup & Summary Dashboard powered by Gemini.")
 
 col1, col2 = st.columns([1, 3])
 
 with col1:
     st.subheader("Controls")
-    max_emails = st.slider("Number of emails to scan", 1, 20, 10)
-    auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=False)
-    run_btn = st.button("🚀 Fetch, Sort & Clean Inbox", type="primary")
+    max_emails = st.slider("Number of emails to scan", 1, 30, 15)
+    
+    # Auto-cleanup toggles
+    auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam emails", value=True)
+    auto_trash_promo = st.checkbox("🗑️ Automatically trash Promotional emails", value=True)
+    
+    run_btn = st.button("🚀 Fetch, Sort & Clean All Mail", type="primary")
 
 with col2:
     st.subheader("Live Categorized Feed")
@@ -106,69 +110,73 @@ with col2:
         if not GEMINI_API_KEY:
             st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
         else:
-            with st.spinner("Connecting to Gmail, analyzing via Gemini, and sorting..."):
+            with st.spinner("Scanning inbox, spam folder, analyzing via Gemini, and cleaning..."):
                 service = get_gmail_service()
                 if service:
-                    # Removed 'label:unread' filter to scan recent messages across all folders (including Spam)
-                    results = service.users().messages().list(userId='me', q='', maxResults=max_emails).execute()
+                    # Query 'in:all' searches across Inbox, Spam, and Archives to capture everything
+                    results = service.users().messages().list(userId='me', q='in:all', maxResults=max_emails).execute()
                     messages = results.get('messages', [])
 
                     if not messages:
                         st.info("No messages found in your mailbox.")
                     else:
-                        st.success(f"Successfully processed {len(messages)} email(s).")
+                        st.success(f"Successfully processed {len(messages)} email(s) across your account.")
                         
                         categorized_bins = {
                             "Urgent": [],
                             "Client Project": [],
                             "Security Alert": [],
                             "General": [],
+                            "Promotional": [],
                             "Spam": []
                         }
 
                         for msg in messages:
                             msg_id = msg['id']
-                            txt = service.users().messages().get(userId='me', id=msg_id).execute()
-                            headers = txt.get('payload', {}).get('headers', [])
-                            
-                            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                            snippet = txt.get('snippet', '')
+                            try:
+                                txt = service.users().messages().get(userId='me', id=msg_id).execute()
+                                headers = txt.get('payload', {}).get('headers', [])
+                                
+                                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                                snippet = txt.get('snippet', '')
 
-                            ai_response = analyze_email_with_gemini(subject, sender, snippet)
-                            
-                            category = "General"
-                            summary = ai_response
-                            for line in ai_response.split('\n'):
-                                if "Category:" in line:
-                                    clean_cat = line.replace("Category:", "").strip().replace("[", "").replace("]", "")
-                                    if clean_cat in categorized_bins:
-                                        category = clean_cat
-                                elif "Summary:" in line:
-                                    summary = line.replace("Summary:", "").strip()
+                                ai_response = analyze_email_with_gemini(subject, sender, snippet)
+                                
+                                category = "General"
+                                summary = ai_response
+                                for line in ai_response.split('\n'):
+                                    if "Category:" in line:
+                                        clean_cat = line.replace("Category:", "").strip().replace("[", "").replace("]", "")
+                                        if clean_cat in categorized_bins:
+                                            category = clean_cat
+                                    elif "Summary:" in line:
+                                        summary = line.replace("Summary:", "").strip()
 
-                            email_data = {
-                                "id": msg_id,
-                                "sender": sender,
-                                "subject": subject,
-                                "snippet": snippet,
-                                "summary": summary
-                            }
+                                email_data = {
+                                    "id": msg_id,
+                                    "sender": sender,
+                                    "subject": subject,
+                                    "snippet": snippet,
+                                    "summary": summary,
+                                    "trashed": False
+                                }
 
-                            if category == "Spam" and auto_trash_spam:
-                                try:
-                                    service.users().messages().trash(userId='me', id=msg_id).execute()
-                                    email_data["trashed"] = True
-                                except Exception:
-                                    email_data["trashed"] = False
-                            else:
-                                email_data["trashed"] = False
+                                # Handle Trash Action for Spam or Promotional items
+                                if (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo):
+                                    try:
+                                        service.users().messages().trash(userId='me', id=msg_id).execute()
+                                        email_data["trashed"] = True
+                                    except Exception:
+                                        email_data["trashed"] = False
 
-                            categorized_bins[category].append(email_data)
+                                categorized_bins[category].append(email_data)
+                            except Exception:
+                                continue
 
-                        tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🗑️ Spam"])
+                        tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
                         
-                        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Spam"]
+                        bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
                         for i, tab in enumerate(tabs):
                             current_cat = bin_keys[i]
                             items = categorized_bins[current_cat]
@@ -185,4 +193,4 @@ with col2:
                                             st.markdown("---")
                                             st.markdown(f"**AI Summary:** {item['summary']}")
                                             if item['trashed']:
-                                                st.error("🗑️ *Automatically moved to Trash (identified as Spam).*")
+                                                st.error(f"🗑️ *Automatically moved to Trash (identified as {current_cat}).*")
