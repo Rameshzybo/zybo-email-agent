@@ -7,23 +7,6 @@ import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from google import genai
-
-# Safe Optional Attachment Parsers
-try:
-    import pypdf
-except ImportError:
-    pypdf = None
-
-try:
-    import docx
-except ImportError:
-    docx = None
-
-try:
-    import openpyxl
-except ImportError:
-    openpyxl = None
 
 # Page Configuration
 st.set_page_config(page_title="ZYBO Email Agent Dashboard", page_icon="✉️", layout="wide")
@@ -84,53 +67,19 @@ def get_gmail_service():
             
     return build('gmail', 'v1', credentials=creds)
 
-# --- Attachment Handling ---
-def parse_attachment_content(service, msg_id, part):
-    filename = part.get('filename', '')
-    mime_type = part.get('mimeType', '')
-    body = part.get('body', {})
-    attachment_id = body.get('attachmentId')
-
-    if not attachment_id:
-        return filename, "No payload data"
-
-    try:
-        attachment = service.users().messages().attachments().get(
-            userId='me', messageId=msg_id, id=attachment_id
-        ).execute()
-        file_data = base64.urlsafe_b64decode(attachment['data'])
-
-        if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
-            reader = pypdf.PdfReader(io.BytesIO(file_data))
-            text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-            return filename, f"[PDF Text Summary]: {text[:300]}..."
-
-        elif ('word' in mime_type or filename.endswith('.docx')) and docx:
-            doc = docx.Document(io.BytesIO(file_data))
-            text = "\n".join([p.text for p in doc.paragraphs if p.text])
-            return filename, f"[Word Doc Text]: {text[:300]}..."
-
-        elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
-            wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
-            sheet = wb.active
-            rows = []
-            for row in sheet.iter_rows(values_only=True):
-                filtered_row = [str(cell) for cell in row if cell is not None]
-                if filtered_row:
-                    rows.append(" | ".join(filtered_row))
-            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5])}..."
-
-        return filename, f"[Attached File]: {filename}"
-    except Exception as e:
-        return filename, f"Attachment parse error"
-
-# --- Smart Local Rule Classifier (Zero API Quota Cost) ---
-def classify_email_locally(subject, sender, snippet):
+# --- Smart Local Rule Classifier with Expanded Digest & Promo Matching ---
+def classify_email_locally(subject, sender, snippet, headers):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
     send_lower = sender.lower()
 
-    # 1. Security Alerts (Wordfence, Login alerts)
+    # Extract List-Unsubscribe header if present
+    unsubscribe_link = ""
+    for h in headers:
+        if h['name'].lower() == 'list-unsubscribe':
+            unsubscribe_link = h['value'].strip('<>')
+
+    # 1. Security Alerts
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower or "vulnerability" in sub_lower:
         return {
             "category": "Security Alert",
@@ -138,7 +87,8 @@ def classify_email_locally(subject, sender, snippet):
             "reason": "Automated website security or firewall notification.",
             "action_required": "Review Required",
             "summary": f"Security warning regarding website activity from {sender}.",
-            "suggested_reply": "Thank you. The technical team will review this security alert."
+            "suggested_reply": "Thank you. The technical team will review this security alert.",
+            "unsubscribe": unsubscribe_link
         }
 
     # 2. Spam & Comment Moderation
@@ -149,18 +99,20 @@ def classify_email_locally(subject, sender, snippet):
             "reason": "Unsolicited WordPress comment moderation notification.",
             "action_required": "None",
             "summary": "WordPress comment moderation request.",
-            "suggested_reply": "Automated notification processed."
+            "suggested_reply": "Automated notification processed.",
+            "unsubscribe": unsubscribe_link
         }
 
-    # 3. Promotional & Marketing
-    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "newsletter" in sub_lower or "promo" in sub_lower:
+    # 3. Promotional, Newsletters & Digests (e27, Reddit, etc.)
+    if "e27" in send_lower or "reddit" in send_lower or "digest" in sub_lower or "newsletter" in sub_lower or "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "promo" in sub_lower or "weekly" in sub_lower:
         return {
             "category": "Promotional",
             "priority": "Low",
-            "reason": "Marketing communication or promotional newsletter.",
+            "reason": "Marketing digest, newsletter or promotional communication.",
             "action_required": "None",
-            "summary": "Marketing newsletter or promotional offer.",
-            "suggested_reply": "Offers noted."
+            "summary": f"Promotional publication or digest: {subject}",
+            "suggested_reply": "Offers noted.",
+            "unsubscribe": unsubscribe_link
         }
 
     # 4. Client Projects
@@ -171,7 +123,8 @@ def classify_email_locally(subject, sender, snippet):
             "reason": "Client website or agency project correspondence.",
             "action_required": "Reply Needed",
             "summary": f"Client project communication: {snippet[:100]}...",
-            "suggested_reply": "Hello,\n\nThank you for your update. Ramesh and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
+            "suggested_reply": "Hello,\n\nThank you for your update. Ramesh and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab",
+            "unsubscribe": unsubscribe_link
         }
 
     # Default General
@@ -181,7 +134,8 @@ def classify_email_locally(subject, sender, snippet):
         "reason": "Standard correspondence or notification.",
         "action_required": "None",
         "summary": snippet[:150] if snippet else "No summary available.",
-        "suggested_reply": "Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your message and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"
+        "suggested_reply": "Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your message and will respond shortly.\n\nBest regards,\nZYBO Tech Lab",
+        "unsubscribe": unsubscribe_link
     }
 
 # Initialize session state for persistent results
@@ -190,7 +144,7 @@ if "analyzed_emails" not in st.session_state:
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent Dashboard")
-st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detection, Attachment Extraction & Cleanup.")
+st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detection, Unsubscribe & Cleanup.")
 
 # Sidebar Controls
 with st.sidebar:
@@ -208,7 +162,7 @@ with st.sidebar:
 
 # Execute scan
 if run_btn:
-    with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders (Inbox, Spam, Trash) without exhausting quotas..."):
+    with st.spinner(f"Scanning up to {max_scan_limit} emails across all folders..."):
         service = get_gmail_service()
         if service:
             messages = []
@@ -235,14 +189,13 @@ if run_btn:
                     if not page_token:
                         break
             except Exception as e:
-                st.error(f"API Scan Error (Rate limit hit, please wait a moment): {e}")
+                st.error(f"API Scan Error: {e}")
 
             if not messages:
                 st.info("No matching messages found in your account.")
                 st.session_state.analyzed_emails = []
             else:
                 processed_items = []
-                # Process in batches with small sleep to prevent 403 Total Query Cost limits
                 for idx, msg in enumerate(messages):
                     msg_id = msg['id']
                     try:
@@ -254,12 +207,13 @@ if run_btn:
                         sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                         snippet = txt.get('snippet', '')
 
-                        # Classify locally to save API quota
-                        classification = classify_email_locally(subject, sender, snippet)
+                        classification = classify_email_locally(subject, sender, snippet, headers)
                         
                         category = classification["category"]
                         if 'SPAM' in label_ids:
-                            category = 'Spread Spam' if False else 'Spam'
+                            category = 'Spam'
+
+                        is_trashed = 'TRASH' in label_ids
 
                         email_data = {
                             "id": msg_id,
@@ -272,15 +226,15 @@ if run_btn:
                             "action_required": classification["action_required"],
                             "summary": classification["summary"],
                             "suggested_reply": classification["suggested_reply"],
-                            "attachments": [],
+                            "unsubscribe": classification["unsubscribe"],
                             "is_starred": 'STARRED' in label_ids,
                             "is_unread": 'UNREAD' in label_ids,
-                            "trashed": 'TRASH' in label_ids
+                            "trashed": is_trashed
                         }
 
                         # Auto-Cleanup Execution
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                        if should_trash and not require_confirmation and not email_data["trashed"]:
+                        if should_trash and not require_confirmation and not is_trashed:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
@@ -289,9 +243,8 @@ if run_btn:
 
                         processed_items.append(email_data)
                         
-                        # Throttle every 20 messages to prevent Gmail 403 Total Query Cost limits
                         if idx > 0 and idx % 20 == 0:
-                            time.sleep(0.5)
+                            time.sleep(0.3)
                             
                     except Exception:
                         continue
@@ -344,10 +297,10 @@ if st.session_state.analyzed_emails:
                         st.caption(f"Reason: {item['reason']}")
                         
                         if item['trashed']:
-                            st.error("🗑️ *Moved to Trash.*")
+                            st.error("🗑️ *Moved to Trash (Synced with Gmail).*")
 
-                        # Action Buttons (Star, Mark Read, Archive, Delete)
-                        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+                        # Action Buttons (Star, Mark Read, Archive, Unsubscribe, Delete)
+                        btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns(5)
                         service = get_gmail_service()
                         
                         with btn_col1:
@@ -375,15 +328,22 @@ if st.session_state.analyzed_emails:
                                     st.success("Archived!")
 
                         with btn_col4:
+                            if item['unsubscribe']:
+                                if st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}"):
+                                    st.markdown(f"[Click here to Unsubscribe]({item['unsubscribe']})", unsafe_allow_html=True)
+                            else:
+                                st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}", disabled=True)
+
+                        with btn_col5:
                             if st.button("🗑️ Delete", key=f"del_{item['id']}"):
                                 if service:
                                     try:
                                         service.users().messages().trash(userId='me', id=item['id']).execute()
                                         item['trashed'] = True
-                                        st.success("Deleted successfully!")
+                                        st.success("Deleted from Gmail successfully!")
                                         st.rerun()
                                     except Exception as err:
-                                        st.error(f"Delete Error (Verify your OAuth token permissions): {err}")
+                                        st.error(f"Delete Error: {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
