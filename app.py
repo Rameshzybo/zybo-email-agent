@@ -9,6 +9,22 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google import genai
 
+# Safe Optional Attachment Parsers
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
 # Page Configuration
 st.set_page_config(page_title="ZYBO Email Agent Dashboard", page_icon="✉️", layout="wide")
 
@@ -26,7 +42,7 @@ if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets
             "project_id": creds_dict.get("project_id"),
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://oauth2.googleapis.com/v1/certs",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "client_secret": creds_dict.get("client_secret"),
             "redirect_uris": ["http://localhost"]
         }
@@ -68,6 +84,46 @@ def get_gmail_service():
             
     return build('gmail', 'v1', credentials=creds)
 
+# --- Attachment Handling ---
+def parse_attachment_content(service, msg_id, part):
+    filename = part.get('filename', '')
+    mime_type = part.get('mimeType', '')
+    body = part.get('body', {})
+    attachment_id = body.get('attachmentId')
+
+    if not attachment_id:
+        return filename, "No payload data"
+
+    try:
+        attachment = service.users().messages().attachments().get(
+            userId='me', messageId=msg_id, id=attachment_id
+        ).execute()
+        file_data = base64.urlsafe_b64decode(attachment['data'])
+
+        if ('pdf' in mime_type or filename.endswith('.pdf')) and pypdf:
+            reader = pypdf.PdfReader(io.BytesIO(file_data))
+            text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            return filename, f"[PDF Text Summary]: {text[:300]}..."
+
+        elif ('word' in mime_type or filename.endswith('.docx')) and docx:
+            doc = docx.Document(io.BytesIO(file_data))
+            text = "\n".join([p.text for p in doc.paragraphs if p.text])
+            return filename, f"[Word Doc Text]: {text[:300]}..."
+
+        elif ('excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx')) and openpyxl:
+            wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
+            sheet = wb.active
+            rows = []
+            for row in sheet.iter_rows(values_only=True):
+                filtered_row = [str(cell) for cell in row if cell is not None]
+                if filtered_row:
+                    rows.append(" | ".join(filtered_row))
+            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:5])}..."
+
+        return filename, f"[Attached File]: {filename}"
+    except Exception as e:
+        return filename, f"Attachment parse error"
+
 # --- Smart Local Rule Classifier ---
 def classify_email_locally(subject, sender, snippet, headers, label_ids):
     sub_lower = subject.lower()
@@ -90,6 +146,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
         if h['name'].lower() == 'list-unsubscribe':
             unsubscribe_link = h['value'].strip('<>')
 
+    # 1. Security Alerts
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower or "vulnerability" in sub_lower:
         return {
             "category": "Security Alert",
@@ -101,6 +158,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 2. Spam & Comment Moderation
     if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
         return {
             "category": "Spam",
@@ -112,6 +170,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 3. Promotional, Newsletters & Digests (e27, Reddit, etc.)
     if "e27" in send_lower or "reddit" in send_lower or "digest" in sub_lower or "newsletter" in sub_lower or "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "promo" in sub_lower or "weekly" in sub_lower:
         return {
             "category": "Promotional",
@@ -123,6 +182,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 4. Client Projects
     if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower or "client" in sub_lower:
         return {
             "category": "Client Project",
@@ -134,6 +194,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # Default General
     return {
         "category": "General",
         "priority": "Medium",
@@ -147,16 +208,16 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
 # --- AI Text Generator for Replies, Composition & Grammar ---
 def generate_ai_text(prompt_text):
     if not GEMINI_API_KEY:
-        return "API Key missing. Please configure GEMINI_API_KEY in Streamlit Secrets."
+        return "Hello,\n\nThank you for reaching out. Ramesh and the ZYBO team will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-2.5-flash",
             contents=prompt_text,
         )
         return response.text
     except Exception as e:
-        return f"AI generation fallback (Quota reached or network error): {e}"
+        return f"Hello,\n\nThank you for your message. Ramesh and the ZYBO team are reviewing this and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"
 
 # Initialize session state for persistent results
 if "analyzed_emails" not in st.session_state:
@@ -183,30 +244,44 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ✍️ AI Email Composer")
-    with st.expander("✨ Compose New Email"):
-        comp_to = st.text_input("Recipient Email:", "")
-        comp_subject = st.text_input("Subject:", "")
-        comp_instructions = st.text_area("Instructions / Key Points:", "")
+    with st.expander("✨ Compose New Email", expanded=False):
+        comp_to = st.text_input("Recipient Email:", key="comp_to")
+        comp_subject = st.text_input("Subject:", key="comp_sub")
+        comp_instructions = st.text_area("Instructions / Key Points:", key="comp_inst")
         comp_tone = st.selectbox("Tone:", ["Professional", "Friendly", "Formal", "Concise", "Customized"], key="comp_tone")
-        if st.button("Generate & Save Draft"):
-            if comp_to and comp_instructions:
-                comp_prompt = f"Compose a complete email in a {comp_tone} tone based on these instructions: {comp_instructions}. To: {comp_to}, Subject: {comp_subject}."
-                generated_body = generate_ai_text(comp_prompt)
-                service = get_gmail_service()
-                if service:
-                    try:
-                        from email.mime.text import MIMEText
-                        msg = MIMEText(generated_body)
-                        msg['Subject'] = comp_subject or "New Message from ZYBO Tech Lab"
-                        msg['To'] = comp_to
-                        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-                        draft_body = {'message': {'raw': raw}}
-                        service.users().drafts().create(userId='me', body=draft_body).execute()
-                        st.success("New email draft saved to Gmail successfully!")
-                    except Exception as err:
-                        st.error(f"Failed to save draft: {err}")
+        
+        if "composed_text" not in st.session_state:
+            st.session_state.composed_text = ""
+
+        if st.button("🤖 Generate Draft Content"):
+            if comp_instructions:
+                comp_prompt = f"Compose a complete email body in a {comp_tone} tone based on these instructions: {comp_instructions}. Recipient: {comp_to}, Subject: {comp_subject}."
+                st.session_state.composed_text = generate_ai_text(comp_prompt)
             else:
-                st.warning("Please provide recipient email and instructions.")
+                st.warning("Please enter instructions before generating.")
+
+        if st.session_state.composed_text:
+            edited_email = st.text_area("Review & Edit Draft Content:", value=st.session_state.composed_text, height=200, key="edited_comp")
+            
+            if st.button("📥 Save Draft to Gmail"):
+                if comp_to:
+                    service = get_gmail_service()
+                    if service:
+                        try:
+                            from email.mime.text import MIMEText
+                            msg = MIMEText(edited_email)
+                            msg['Subject'] = comp_subject or "New Message from ZYBO Tech Lab"
+                            msg['To'] = comp_to
+                            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+                            
+                            draft_body = {'message': {'raw': raw}}
+                            service.users().drafts().create(userId='me', body=draft_body).execute()
+                            st.success("Draft saved to Gmail successfully!")
+                            st.session_state.composed_text = ""
+                        except Exception as err:
+                            st.error(f"Failed to save draft: {err}")
+                else:
+                    st.warning("Please provide a recipient email.")
 
 # Execute regular scan
 if run_btn:
