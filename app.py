@@ -160,18 +160,18 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    # Default scan limit optimized to 100 for speed and stability
     max_scan_limit = st.slider("Max emails to scan", 10, 500, 100)
     
     st.markdown("---")
-    st.markdown("### 🧹 Automation Cleanup")
+    st.markdown("### 🧹 Actions & Cleanup")
     auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam", value=True)
     auto_trash_promo = st.checkbox("🗑️ Automatically trash Promotions", value=True)
     require_confirmation = st.checkbox("🔒 Require confirmation before trashing", value=False)
     
     run_btn = st.button("🚀 Fetch, Analyze & Organize Mail", type="primary")
+    scan_spam_btn = st.button("🚀 Scan Spam Separately", type="secondary")
 
-# Execute scan
+# Execute regular scan
 if run_btn:
     with st.spinner(f"Scanning up to {max_scan_limit} active emails (excluding Trash)..."):
         service = get_gmail_service()
@@ -222,7 +222,8 @@ if run_btn:
                         classification = classify_email_locally(subject, sender, snippet, headers, label_ids)
                         
                         category = classification["category"]
-                        is_trashed = False
+                        if 'SPAM' in label_ids:
+                            category = 'Spam'
 
                         email_data = {
                             "id": msg_id,
@@ -238,12 +239,11 @@ if run_btn:
                             "unsubscribe": classification.get("unsubscribe", ""),
                             "is_starred": 'STARRED' in label_ids,
                             "is_unread": 'UNREAD' in label_ids,
-                            "trashed": is_trashed
+                            "trashed": 'TRASH' in label_ids
                         }
 
-                        # Auto-Cleanup Execution with Rate Limit Protection
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
-                        if should_trash and not require_confirmation:
+                        if should_trash and not require_confirmation and not email_data["trashed"]:
                             try:
                                 service.users().messages().trash(userId='me', id=msg_id).execute()
                                 email_data["trashed"] = True
@@ -261,6 +261,70 @@ if run_btn:
 
                 st.session_state.analyzed_emails = processed_items
                 st.success(f"Successfully processed {len(processed_items)} emails across your account!")
+
+# Execute standalone spam scan
+if scan_spam_btn:
+    with st.spinner("Scanning Spam folder separately..."):
+        service = get_gmail_service()
+        if service:
+            try:
+                results = service.users().messages().list(
+                    userId='me', 
+                    q='in:spam', 
+                    includeSpamTrash=True, 
+                    maxResults=100
+                ).execute()
+                
+                messages = results.get('messages', [])
+                if not messages:
+                    st.info("No spam messages found.")
+                    st.session_state.analyzed_emails = []
+                else:
+                    processed_items = []
+                    for msg in messages:
+                        msg_id = msg['id']
+                        try:
+                            txt = service.users().messages().get(userId='me', id=msg_id).execute()
+                            headers = txt.get('payload', {}).get('headers', [])
+                            label_ids = txt.get('labelIds', [])
+                            
+                            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                            snippet = txt.get('snippet', '')
+
+                            email_data = {
+                                "id": msg_id,
+                                "sender": sender,
+                                "subject": subject,
+                                "snippet": snippet,
+                                "category": "Spam",
+                                "priority": "Low",
+                                "reason": "Retrieved from Spam folder scan.",
+                                "action_required": "None",
+                                "summary": snippet[:150],
+                                "suggested_reply": "N/A",
+                                "unsubscribe": "",
+                                "is_starred": 'STARRED' in label_ids,
+                                "is_unread": 'UNREAD' in label_ids,
+                                "trashed": 'TRASH' in label_ids
+                            }
+
+                            if auto_trash_spam and not require_confirmation and not email_data["trashed"]:
+                                try:
+                                    service.users().messages().trash(userId='me', id=msg_id).execute()
+                                    email_data["trashed"] = True
+                                    time.sleep(0.3)
+                                except Exception:
+                                    pass
+
+                            processed_items.append(email_data)
+                        except Exception:
+                            continue
+
+                    st.session_state.analyzed_emails = processed_items
+                    st.success(f"Successfully scanned {len(processed_items)} spam messages!")
+            except Exception as err:
+                st.error(f"Error scanning spam folder: {err}")
 
 # Render Dashboard Metrics & Feed
 if st.session_state.analyzed_emails:
@@ -311,7 +375,7 @@ if st.session_state.analyzed_emails:
 
                         # Action Buttons (Star, Mark Read, Archive, Unsubscribe, Delete)
                         btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns(5)
-                        service = build('gmail', 'v1', credentials=None) if False else get_gmail_service()
+                        service = get_gmail_service()
                         
                         with btn_col1:
                             star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
@@ -349,15 +413,13 @@ if st.session_state.analyzed_emails:
                             if st.button("🗑️ Delete", key=f"del_{item['id']}"):
                                 if service:
                                     try:
-                                        # Forces true Gmail API trash sync
                                         service.users().messages().trash(userId='me', id=item['id']).execute()
                                         item['trashed'] = True
-                                        # Remove instantly from active session list so it vanishes immediately
                                         st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] != item['id']]
                                         st.success("Deleted from Gmail successfully!")
                                         st.rerun()
                                     except Exception as err:
-                                        st.error(f"Delete Error (Ensure your token has gmail.modify scope): {err}")
+                                        st.error(f"Delete Error: {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item.get('suggested_reply', ''), key=f"reply_{item['id']}")
@@ -376,4 +438,4 @@ if st.session_state.analyzed_emails:
                                     except Exception as err:
                                         st.error(f"Failed to create draft: {err}")
 else:
-    st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** in the sidebar to run the scan.")
+    st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** or **'🚀 Scan Spam Separately'** in the sidebar to begin.")
