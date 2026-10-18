@@ -226,7 +226,7 @@ if run_btn:
                             "action_required": classification["action_required"],
                             "summary": classification["summary"],
                             "suggested_reply": classification["suggested_reply"],
-                            "unsubscribe": classification["unsubscribe"],
+                            "unsubscribe": classification.get("unsubscribe", ""),
                             "is_starred": 'STARRED' in label_ids,
                             "is_unread": 'UNREAD' in label_ids,
                             "trashed": is_trashed
@@ -304,21 +304,21 @@ if st.session_state.analyzed_emails:
                         service = get_gmail_service()
                         
                         with btn_col1:
-                            star_label = "⭐ Unstar" if item['is_starred'] else "⭐ Star"
+                            star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
                             if st.button(star_label, key=f"star_{item['id']}"):
                                 if service:
-                                    body = {'removeLabelIds': ['STARRED']} if item['is_starred'] else {'addLabelIds': ['STARRED']}
+                                    body = {'removeLabelIds': ['STARRED']} if item.get('is_starred', False) else {'addLabelIds': ['STARRED']}
                                     service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                    item['is_starred'] = not item['is_starred']
+                                    item['is_starred'] = not item.get('is_starred', False)
                                     st.rerun()
 
                         with btn_col2:
-                            read_label = "✉️ Unread" if not item['is_unread'] else "📩 Read"
+                            read_label = "✉️ Unread" if not item.get('is_unread', False) else "📩 Read"
                             if st.button(read_label, key=f"read_{item['id']}"):
                                 if service:
-                                    body = {'addLabelIds': ['UNREAD']} if not item['is_unread'] else {'removeLabelIds': ['UNREAD']}
+                                    body = {'addLabelIds': ['UNREAD']} if not item.get('is_unread', False) else {'removeLabelIds': ['UNREAD']}
                                     service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
-                                    item['is_unread'] = not item['is_unread']
+                                    item['is_unread'] = not item.get('is_unread', False)
                                     st.rerun()
 
                         with btn_col3:
@@ -328,9 +328,10 @@ if st.session_state.analyzed_emails:
                                     st.success("Archived!")
 
                         with btn_col4:
-                            if item['unsubscribe']:
+                            unsub_link = item.get('unsubscribe', '')
+                            if unsub_link:
                                 if st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}"):
-                                    st.markdown(f"[Click here to Unsubscribe]({item['unsubscribe']})", unsafe_allow_html=True)
+                                    st.markdown(f"[Click here to Unsubscribe]({unsub_link})", unsafe_allow_html=True)
                             else:
                                 st.button("🔕 Unsubscribe", key=f"unsub_{item['id']}", disabled=True)
 
@@ -346,7 +347,7 @@ if st.session_state.analyzed_emails:
                                         st.error(f"Delete Error: {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
-                            reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
+                            reply_text = st.text_area("Edit Draft Reply:", value=item.get('suggested_reply', ''), key=f"reply_{item['id']}")
                             if st.button("📥 Save Draft to Gmail", key=f"draft_{item['id']}"):
                                 if service:
                                     try:
