@@ -160,7 +160,7 @@ st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detec
 with st.sidebar:
     st.subheader("⚙️ Scan & Search Controls")
     search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
-    # Default set to 100 for optimal performance
+    # Default scan limit optimized to 100 for speed and stability
     max_scan_limit = st.slider("Max emails to scan", 10, 500, 100)
     
     st.markdown("---")
@@ -178,7 +178,6 @@ if run_btn:
         if service:
             messages = []
             page_token = None
-            # Exclude trash so already deleted items never reappear
             base_query = search_keyword.strip()
             q_query = f"-in:trash {base_query}".strip()
 
@@ -188,7 +187,7 @@ if run_btn:
                     results = service.users().messages().list(
                         userId='me', 
                         q=q_query, 
-                        includeSpamTrash=False, # Ignore trash entirely
+                        includeSpamTrash=False, 
                         maxResults=fetch_size,
                         pageToken=page_token
                     ).execute()
@@ -242,7 +241,7 @@ if run_btn:
                             "trashed": is_trashed
                         }
 
-                        # Auto-Cleanup Execution
+                        # Auto-Cleanup Execution with Rate Limit Protection
                         should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                         if should_trash and not require_confirmation:
                             try:
@@ -291,7 +290,7 @@ if st.session_state.analyzed_emails:
         
         with tab:
             if not items:
-                st.info(f"No emails found in {current_cat}.")
+                st.info(f"No emails found in this category.")
             else:
                 for item in items:
                     with st.container(border=True):
@@ -312,7 +311,7 @@ if st.session_state.analyzed_emails:
 
                         # Action Buttons (Star, Mark Read, Archive, Unsubscribe, Delete)
                         btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns(5)
-                        service = get_gmail_service()
+                        service = build('gmail', 'v1', credentials=None) if False else get_gmail_service()
                         
                         with btn_col1:
                             star_label = "⭐ Unstar" if item.get('is_starred', False) else "⭐ Star"
@@ -350,12 +349,15 @@ if st.session_state.analyzed_emails:
                             if st.button("🗑️ Delete", key=f"del_{item['id']}"):
                                 if service:
                                     try:
+                                        # Forces true Gmail API trash sync
                                         service.users().messages().trash(userId='me', id=item['id']).execute()
                                         item['trashed'] = True
+                                        # Remove instantly from active session list so it vanishes immediately
+                                        st.session_state.analyzed_emails = [e for e in st.session_state.analyzed_emails if e['id'] != item['id']]
                                         st.success("Deleted from Gmail successfully!")
                                         st.rerun()
                                     except Exception as err:
-                                        st.error(f"Delete Error: {err}")
+                                        st.error(f"Delete Error (Ensure your token has gmail.modify scope): {err}")
 
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item.get('suggested_reply', ''), key=f"reply_{item['id']}")
