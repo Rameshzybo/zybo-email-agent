@@ -66,24 +66,48 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 def analyze_email_with_gemini(subject, sender, snippet):
-    # Rule-based fast paths to save API quota from 429 errors
     sub_lower = subject.lower()
-    if "wordfence alert" in sub_lower or "security" in sub_lower:
+    snip_lower = snippet.lower()
+    send_lower = sender.lower()
+
+    # Rule 1: Security Alerts & Wordfence
+    if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower:
         return """Category: Security Alert
 Priority: High
-Reason: System security or firewall notification detected.
+Reason: Automated site security/firewall alert detected.
 Action Required: Review Required
-Summary: Automated security warning or alert regarding website integrity."""
-    
-    if "unsubscribe" in snippet.lower() or "offer" in sub_lower or "discount" in sub_lower:
+Summary: Automated security notification regarding website activity.
+Suggested Reply: Thank you. The technical team will review this security alert."""
+
+    # Rule 2: WordPress Comment Spam / Moderation
+    if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
+        return """Category: Spam
+Priority: Low
+Reason: Unsolicited WordPress comment moderation notification.
+Action Required: None
+Summary: Automated WordPress comment moderation notice.
+Suggested Reply: Notification processed automatically."""
+
+    # Rule 3: Promotional & Marketing Mail
+    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "newsletter" in sub_lower or "promo" in sub_lower:
         return """Category: Promotional
 Priority: Low
-Reason: Marketing or promotional content detected.
+Reason: Marketing communication or promotional newsletter detected.
 Action Required: None
-Summary: Promotional newsletter or marketing offer."""
+Summary: Marketing content or promotional newsletter.
+Suggested Reply: Thank you for sharing this offer."""
+
+    # Rule 4: Client Projects
+    if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower:
+        return f"""Category: Client Project
+Priority: High
+Reason: Client website or agency project correspondence.
+Action Required: Reply Needed
+Summary: {snippet[:120]}...
+Suggested Reply: Hello,\n\nThank you for your update regarding this project. Ramesh and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"""
 
     if not GEMINI_API_KEY:
-        return "Category: General\nPriority: Low\nReason: API key missing\nAction Required: None\nSummary: Gemini API Key missing."
+        return "Category: General\nPriority: Low\nReason: API key missing\nAction Required: None\nSummary: Gemini API Key missing.\nSuggested Reply: Thank you for your email."
     
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -106,13 +130,13 @@ Summary: Promotional newsletter or marketing offer."""
         )
         return response.text
     except Exception as e:
-        # Fallback if quota is exhausted
+        # Smart Local Fallback when API Quota is Exhausted (429)
         return f"""Category: General
 Priority: Low
-Reason: API quota limit reached (429). Used fallback classifier.
+Reason: API quota limit reached. Processed using local rule classifier.
 Action Required: None
-Summary: {snippet[:100]}...
-Suggested Reply: Thank you for your message."""
+Summary: {snippet[:120] if snippet else 'No preview snippet available.'}
+Suggested Reply: Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your email regarding "{subject}" and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"""
 
 # Initialize session state for persistent results
 if "analyzed_emails" not in st.session_state:
@@ -125,7 +149,7 @@ st.markdown("Advanced 24/7 Mail Categorization, Smart Priority Detection, Automa
 # Sidebar Controls
 with st.sidebar:
     st.subheader("⚙️ Agent Controls")
-    max_scan_limit = st.slider("Max emails to scan", 5, 50, 15)  # Lowered default to preserve quota
+    max_scan_limit = st.slider("Max emails to scan", 5, 100, 20)
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
@@ -187,7 +211,7 @@ if run_btn:
                             reason = "Routine notification"
                             action_req = "None"
                             summary = snippet
-                            suggested_reply = "Thank you for reaching out."
+                            suggested_reply = f"Hello,\n\nThank you for contacting ZYBO Tech Lab regarding '{subject}'. We will review your message and get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
 
                             for line in ai_response.split('\n'):
                                 if "Category:" in line:
@@ -205,6 +229,7 @@ if run_btn:
                                 elif "Suggested Reply:" in line:
                                     suggested_reply = line.replace("Suggested Reply:", "").strip()
 
+                            # Force classification override if Gmail already tags it as SPAM
                             if 'SPAM' in label_ids:
                                 category = 'Spam'
 
@@ -218,7 +243,7 @@ if run_btn:
                                 "reason": reason,
                                 "action_required": action_req,
                                 "summary": summary,
-                                "suggested_reply": suggested_reply,
+                                "suggested_reply": suggested_reply if suggested_reply != "N/A" else f"Hello,\n\nThank you for reaching out regarding {subject}. We will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab",
                                 "trashed": False
                             }
 
