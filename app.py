@@ -1,13 +1,20 @@
+import base64
 import json
 import os
+import io
 import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google import genai
 
+# Attachment Parsers
+import pypdf
+import docx
+import openpyxl
+
 # Page Configuration
-st.set_page_config(page_title="ZYBO Email Agent", page_icon="✉️", layout="wide")
+st.set_page_config(page_title="ZYBO Email Agent Dashboard", page_icon="✉️", layout="wide")
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
@@ -65,64 +72,98 @@ def get_gmail_service():
             
     return build('gmail', 'v1', credentials=creds)
 
-def analyze_email_with_gemini(subject, sender, snippet):
+# --- Attachment Handling ---
+def parse_attachment_content(service, msg_id, part):
+    filename = part.get('filename', '')
+    mime_type = part.get('mimeType', '')
+    body = part.get('body', {})
+    attachment_id = body.get('attachmentId')
+
+    if not attachment_id:
+        return filename, "No payload data"
+
+    try:
+        attachment = service.users().messages().attachments().get(
+            userId='me', messageId=msg_id, id=attachment_id
+        ).execute()
+        file_data = base64.urlsafe_b64decode(attachment['data'])
+
+        # PDF Extraction
+        if 'pdf' in mime_type or filename.endswith('.pdf'):
+            reader = pypdf.PdfReader(io.BytesIO(file_data))
+            text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            return filename, f"[PDF Text Summary]: {text[:500]}..."
+
+        # Word Document Extraction
+        elif 'word' in mime_type or filename.endswith('.docx'):
+            doc = docx.Document(io.BytesIO(file_data))
+            text = "\n".join([p.text for p in doc.paragraphs if p.text])
+            return filename, f"[Word Doc Text]: {text[:500]}..."
+
+        # Excel Spreadsheet Extraction
+        elif 'excel' in mime_type or 'spreadsheet' in mime_type or filename.endswith('.xlsx'):
+            wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
+            sheet = wb.active
+            rows = []
+            for row in sheet.iter_rows(values_only=True):
+                filtered_row = [str(cell) for cell in row if cell is not None]
+                if filtered_row:
+                    rows.append(" | ".join(filtered_row))
+            return filename, f"[Excel Sheet Data]: {'; '.join(rows[:10])}..."
+
+        return filename, f"[Attached File]: {filename} ({mime_type})"
+    except Exception as e:
+        return filename, f"Failed to parse {filename}: {e}"
+
+# --- AI & Rule Analysis ---
+def analyze_email_with_gemini(subject, sender, snippet, thread_text, attachment_summary):
     sub_lower = subject.lower()
     snip_lower = snippet.lower()
-    send_lower = sender.lower()
 
-    # Rule 1: Security Alerts & Wordfence
+    # Rule-Based Fast Paths (Saves Gemini Daily Quota)
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower:
         return """Category: Security Alert
 Priority: High
-Reason: Automated site security/firewall alert detected.
+Reason: Automated website security or firewall notification.
 Action Required: Review Required
-Summary: Automated security notification regarding website activity.
-Suggested Reply: Thank you. The technical team will review this security alert."""
+Summary: Security warning requiring monitoring.
+Suggested Reply: Notified technical support for review."""
 
-    # Rule 2: WordPress Comment Spam / Moderation
-    if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
+    if "please moderate" in sub_lower or "new comment" in sub_lower:
         return """Category: Spam
 Priority: Low
 Reason: Unsolicited WordPress comment moderation notification.
 Action Required: None
-Summary: Automated WordPress comment moderation notice.
-Suggested Reply: Notification processed automatically."""
+Summary: WordPress comment moderation request.
+Suggested Reply: Automated notification processed."""
 
-    # Rule 3: Promotional & Marketing Mail
-    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "newsletter" in sub_lower or "promo" in sub_lower:
+    if "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower:
         return """Category: Promotional
 Priority: Low
-Reason: Marketing communication or promotional newsletter detected.
+Reason: Marketing communication or promotional offer.
 Action Required: None
-Summary: Marketing content or promotional newsletter.
-Suggested Reply: Thank you for sharing this offer."""
-
-    # Rule 4: Client Projects
-    if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower:
-        return f"""Category: Client Project
-Priority: High
-Reason: Client website or agency project correspondence.
-Action Required: Reply Needed
-Summary: {snippet[:120]}...
-Suggested Reply: Hello,\n\nThank you for your update regarding this project. Ramesh and the ZYBO team are reviewing your requirements and will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"""
+Summary: Promotional newsletter or discount campaign.
+Suggested Reply: Offers noted."""
 
     if not GEMINI_API_KEY:
-        return "Category: General\nPriority: Low\nReason: API key missing\nAction Required: None\nSummary: Gemini API Key missing.\nSuggested Reply: Thank you for your email."
-    
+        return "Category: General\nPriority: Low\nReason: API Key missing\nAction Required: None\nSummary: Gemini API Key missing.\nSuggested Reply: Thank you."
+
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = f"""
-        Analyze this email and strictly follow this format:
+        Analyze this email and full thread context strictly in this format:
         Category: [Urgent, Client Project, Security Alert, Promotional, Spam, General]
         Priority: [High, Medium, Low]
         Reason: [1 short sentence explaining priority]
         Action Required: [None, Reply Needed, Review Required, Deadlines]
-        Summary: [1-sentence summary]
+        Summary: [Concise summary covering the main points and thread history]
         Suggested Reply: [A professional draft response]
 
         Sender: {sender}
         Subject: {subject}
         Snippet: {snippet}
+        Thread Context: {thread_text[:1000]}
+        Attachment Context: {attachment_summary}
         """
         response = client.models.generate_content(
             model="gemini-3.8-flash",
@@ -130,13 +171,12 @@ Suggested Reply: Hello,\n\nThank you for your update regarding this project. Ram
         )
         return response.text
     except Exception as e:
-        # Smart Local Fallback when API Quota is Exhausted (429)
         return f"""Category: General
 Priority: Low
-Reason: API quota limit reached. Processed using local rule classifier.
+Reason: Processed via fallback engine due to rate limit ({e}).
 Action Required: None
-Summary: {snippet[:120] if snippet else 'No preview snippet available.'}
-Suggested Reply: Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your email regarding "{subject}" and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"""
+Summary: {snippet[:120]}
+Suggested Reply: Hello,\n\nThank you for reaching out to ZYBO Tech Lab. We have received your email and will respond shortly.\n\nBest regards,\nZYBO Tech Lab"""
 
 # Initialize session state for persistent results
 if "analyzed_emails" not in st.session_state:
@@ -144,36 +184,40 @@ if "analyzed_emails" not in st.session_state:
 
 # --- UI Layout ---
 st.title("✉️ ZYBO AI Email Agent Dashboard")
-st.markdown("Advanced 24/7 Mail Categorization, Smart Priority Detection, Automated Cleanup & Reply Generator.")
+st.markdown("Automated Mail Categorization, Thread Summarization, Priority Detection, Attachment Extraction & Cleanup.")
 
 # Sidebar Controls
 with st.sidebar:
-    st.subheader("⚙️ Agent Controls")
+    st.subheader("⚙️ Scan & Search Controls")
+    search_keyword = st.text_input("🔍 Smart Search (Sender, Subject, Keywords)", "")
     max_scan_limit = st.slider("Max emails to scan", 5, 100, 20)
     
     st.markdown("---")
     st.markdown("### 🧹 Automation Cleanup")
     auto_trash_spam = st.checkbox("🗑️ Automatically trash Spam", value=True)
     auto_trash_promo = st.checkbox("🗑️ Automatically trash Promotions", value=True)
-    require_confirmation = st.checkbox("🔒 Require manual review before trashing", value=False)
+    require_confirmation = st.checkbox("🔒 Require confirmation before trashing", value=False)
     
-    run_btn = st.button("🚀 Fetch, Sort & Clean All Mail", type="primary")
+    run_btn = st.button("🚀 Fetch, Analyze & Organize Mail", type="primary")
 
-# Execute scan when button is pressed
+# Execute scan
 if run_btn:
     if not GEMINI_API_KEY:
         st.error("Please configure your GEMINI_API_KEY in Streamlit Secrets.")
     else:
-        with st.spinner("Scanning Inbox, Spam, & Archives, analyzing messages, and sorting..."):
+        with st.spinner("Scanning Gmail account, parsing threads & attachments, and running AI analysis..."):
             service = get_gmail_service()
             if service:
                 messages = []
                 page_token = None
                 
+                # Query construct based on search bar input
+                q_query = f"in:anywhere {search_keyword}".strip()
+
                 while len(messages) < max_scan_limit:
                     results = service.users().messages().list(
                         userId='me', 
-                        q='in:anywhere', 
+                        q=q_query, 
                         includeSpamTrash=True, 
                         maxResults=min(20, max_scan_limit - len(messages)),
                         pageToken=page_token
@@ -189,7 +233,7 @@ if run_btn:
                         break
 
                 if not messages:
-                    st.info("No messages found in your mailbox.")
+                    st.info("No matching messages found in your account.")
                     st.session_state.analyzed_emails = []
                 else:
                     processed_items = []
@@ -197,21 +241,41 @@ if run_btn:
                         msg_id = msg['id']
                         try:
                             txt = service.users().messages().get(userId='me', id=msg_id).execute()
+                            thread_id = txt.get('threadId')
                             headers = txt.get('payload', {}).get('headers', [])
+                            label_ids = txt.get('labelIds', [])
                             
                             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                             snippet = txt.get('snippet', '')
-                            label_ids = txt.get('labelIds', [])
 
-                            ai_response = analyze_email_with_gemini(subject, sender, snippet)
+                            # Fetch Thread History
+                            thread_text = ""
+                            if thread_id:
+                                thread_resp = service.users().threads().get(userId='me', id=thread_id).execute()
+                                thread_msgs = thread_resp.get('messages', [])
+                                thread_text = "\n".join([m.get('snippet', '') for m in thread_msgs])
+
+                            # Parse Attachments
+                            attachments_info = []
+                            payload = txt.get('payload', {})
+                            parts = payload.get('parts', [])
+                            for part in parts:
+                                if part.get('filename'):
+                                    fname, ftext = parse_attachment_content(service, msg_id, part)
+                                    attachments_info.append(f"{fname}: {ftext}")
+
+                            att_summary = " | ".join(attachments_info) if attachments_info else "None"
+
+                            # AI Analysis
+                            ai_response = analyze_email_with_gemini(subject, sender, snippet, thread_text, att_summary)
                             
                             category = "General"
                             priority = "Low"
                             reason = "Routine notification"
                             action_req = "None"
                             summary = snippet
-                            suggested_reply = f"Hello,\n\nThank you for contacting ZYBO Tech Lab regarding '{subject}'. We will review your message and get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
+                            suggested_reply = f"Hello,\n\nThank you for reaching out regarding '{subject}'. We will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab"
 
                             for line in ai_response.split('\n'):
                                 if "Category:" in line:
@@ -229,7 +293,6 @@ if run_btn:
                                 elif "Suggested Reply:" in line:
                                     suggested_reply = line.replace("Suggested Reply:", "").strip()
 
-                            # Force classification override if Gmail already tags it as SPAM
                             if 'SPAM' in label_ids:
                                 category = 'Spam'
 
@@ -243,10 +306,14 @@ if run_btn:
                                 "reason": reason,
                                 "action_required": action_req,
                                 "summary": summary,
-                                "suggested_reply": suggested_reply if suggested_reply != "N/A" else f"Hello,\n\nThank you for reaching out regarding {subject}. We will get back to you shortly.\n\nBest regards,\nZYBO Tech Lab",
+                                "suggested_reply": suggested_reply,
+                                "attachments": [a.split(':')[0] for a in attachments_info],
+                                "is_starred": 'STARRED' in label_ids,
+                                "is_unread": 'UNREAD' in label_ids,
                                 "trashed": False
                             }
 
+                            # Perform Auto-Cleanup
                             should_trash = (category == "Spam" and auto_trash_spam) or (category == "Promotional" and auto_trash_promo)
                             if should_trash and not require_confirmation and 'TRASH' not in label_ids:
                                 try:
@@ -260,12 +327,13 @@ if run_btn:
                             continue
 
                     st.session_state.analyzed_emails = processed_items
-                    st.success(f"Successfully processed {len(processed_items)} emails!")
+                    st.success(f"Successfully processed {len(processed_items)} emails across your account!")
 
-# Render Dashboard Metrics & Feed if data exists
+# Render Dashboard Metrics & Feed
 if st.session_state.analyzed_emails:
     emails = st.session_state.analyzed_emails
     
+    # Metrics Row
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.metric("Total Scanned", len(emails))
@@ -281,6 +349,7 @@ if st.session_state.analyzed_emails:
 
     st.markdown("---")
 
+    # Tabs for Categorization
     tabs = st.tabs(["🚀 Urgent", "💼 Client Project", "🛡️ Security Alert", "📂 General", "🏷️ Promotional", "🗑️ Spam"])
     bin_keys = ["Urgent", "Client Project", "Security Alert", "General", "Promotional", "Spam"]
     
@@ -298,6 +367,8 @@ if st.session_state.analyzed_emails:
                         with c1:
                             st.markdown(f"**From:** {item['sender']}")
                             st.markdown(f"**Subject:** {item['subject']}")
+                            if item['attachments']:
+                                st.markdown(f"📎 **Attachments:** `{', '.join(item['attachments'])}`")
                         with c2:
                             prio_color = "red" if item['priority'] == 'High' else ("orange" if item['priority'] == 'Medium' else "green")
                             st.markdown(f"**Priority:** :{prio_color}[{item['priority']}]")
@@ -308,16 +379,42 @@ if st.session_state.analyzed_emails:
                         
                         if item['trashed']:
                             st.error("🗑️ *Automatically moved to Trash.*")
+
+                        # Gmail Label & Action Buttons
+                        btn_col1, btn_col2, btn_col3 = st.columns(3)
+                        service = get_gmail_service()
                         
+                        with btn_col1:
+                            star_label = "⭐ Unstar" if item['is_starred'] else "⭐ Star"
+                            if st.button(star_label, key=f"star_{item['id']}"):
+                                if service:
+                                    body = {'removeLabelIds': ['STARRED']} if item['is_starred'] else {'addLabelIds': ['STARRED']}
+                                    service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
+                                    item['is_starred'] = not item['is_starred']
+                                    st.rerun()
+
+                        with btn_col2:
+                            read_label = "✉️ Mark Unread" if not item['is_unread'] else "📩 Mark Read"
+                            if st.button(read_label, key=f"read_{item['id']}"):
+                                if service:
+                                    body = {'addLabelIds': ['UNREAD']} if not item['is_unread'] else {'removeLabelIds': ['UNREAD']}
+                                    service.users().messages().modify(userId='me', id=item['id'], body=body).execute()
+                                    item['is_unread'] = not item['is_unread']
+                                    st.rerun()
+
+                        with btn_col3:
+                            if st.button("📥 Archive Email", key=f"arch_{item['id']}"):
+                                if service:
+                                    service.users().messages().modify(userId='me', id=item['id'], body={'removeLabelIds': ['INBOX']}).execute()
+                                    st.success("Archived from Inbox!")
+
+                        # Expandable Section for AI Reply & Draft creation
                         with st.expander("✨ AI Reply Generator & Gmail Draft"):
                             reply_text = st.text_area("Edit Draft Reply:", value=item['suggested_reply'], key=f"reply_{item['id']}")
                             if st.button("📥 Save Draft to Gmail", key=f"draft_{item['id']}"):
-                                service = get_gmail_service()
                                 if service:
                                     try:
                                         from email.mime.text import MIMEText
-                                        import base64
-                                        
                                         msg = MIMEText(reply_text)
                                         msg['Subject'] = f"Re: {item['subject']}"
                                         msg['To'] = item['sender']
@@ -329,4 +426,4 @@ if st.session_state.analyzed_emails:
                                     except Exception as err:
                                         st.error(f"Failed to create draft: {err}")
 else:
-    st.info("👈 Click **'🚀 Fetch, Sort & Clean All Mail'** in the sidebar to start analyzing and cleaning your inbox.")
+    st.info("👈 Click **'🚀 Fetch, Analyze & Organize Mail'** in the sidebar to run the scan.")
