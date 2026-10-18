@@ -3,7 +3,6 @@ import os
 import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google import genai
 
@@ -12,10 +11,10 @@ st.set_page_config(page_title="ZYBO Email Agent", page_icon="✉️", layout="wi
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
-# Securely load Gemini API Key from Streamlit Secrets (No hardcoded keys)
+# Securely load Gemini API Key
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# Automatically generate credentials.json on the fly for cloud deployment security
+# Automatically generate credentials.json on the fly
 if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets:
     creds_dict = dict(st.secrets['GOOGLE_CREDENTIALS'])
     full_creds = {
@@ -32,6 +31,12 @@ if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets
     with open('credentials.json', 'w') as f:
         json.dump(full_creds, f)
 
+# Automatically generate token.json on the fly for cloud authentication
+if not os.path.exists('token.json') and 'GMAIL_TOKEN' in st.secrets:
+    token_dict = dict(st.secrets['GMAIL_TOKEN'])
+    with open('token.json', 'w') as f:
+        json.dump(token_dict, f)
+
 def get_gmail_service():
     creds = None
     if os.path.exists('token.json'):
@@ -40,17 +45,8 @@ def get_gmail_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not os.path.exists('credentials.json'):
-                st.error("Missing 'credentials.json' or Streamlit Secrets configuration!")
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            
-            try:
-                creds = flow.run_local_server(port=8080, prompt='consent')
-            except Exception:
-                st.error("Local browser authentication server could not start. Please ensure token.json is generated.")
-                return None
-                
+            st.error("Authentication token is missing or invalid. Please check your Streamlit Secrets.")
+            return None
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
     return build('gmail', 'v1', credentials=creds)
