@@ -146,6 +146,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
         if h['name'].lower() == 'list-unsubscribe':
             unsubscribe_link = h['value'].strip('<>')
 
+    # 1. Security Alerts
     if "wordfence" in sub_lower or "security" in sub_lower or "login alert" in sub_lower or "vulnerability" in sub_lower:
         return {
             "category": "Security Alert",
@@ -157,6 +158,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 2. Spam & Comment Moderation
     if "please moderate" in sub_lower or "new comment" in sub_lower or "comment on" in sub_lower:
         return {
             "category": "Spam",
@@ -168,6 +170,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 3. Promotional, Newsletters & Digests (e27, Reddit, etc.)
     if "e27" in send_lower or "reddit" in send_lower or "digest" in sub_lower or "newsletter" in sub_lower or "unsubscribe" in snip_lower or "offer" in sub_lower or "discount" in sub_lower or "promo" in sub_lower or "weekly" in sub_lower:
         return {
             "category": "Promotional",
@@ -179,6 +182,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # 4. Client Projects
     if "project" in sub_lower or "design" in sub_lower or "website" in sub_lower or "zybo" in sub_lower or "client" in sub_lower:
         return {
             "category": "Client Project",
@@ -190,6 +194,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
             "unsubscribe": unsubscribe_link
         }
 
+    # Default General
     return {
         "category": "General",
         "priority": "Medium",
@@ -200,7 +205,7 @@ def classify_email_locally(subject, sender, snippet, headers, label_ids):
         "unsubscribe": unsubscribe_link
     }
 
-# --- AI Text Generator with Dynamic Local Fallback ---
+# --- AI Text Generator with Smart Instruction Fallback ---
 def generate_ai_text(prompt_text):
     if GEMINI_API_KEY:
         try:
@@ -212,16 +217,15 @@ def generate_ai_text(prompt_text):
             if response and response.text:
                 return response.text
         except Exception:
-            pass  # Fall back to local drafting if quota/network fails
+            pass  # Fall back to intelligent local drafting if quota is exhausted
 
-    # Intelligent local fallback drafting using the user's instructions
     return f"""Hello,
 
-I hope this message finds you well.
+Regarding your request:
 
-Regarding your update: {prompt_text}
+{prompt_text}
 
-We have reviewed the details and everything looks good on our end. Please let us know if you need any further customization or adjustments.
+Here is the draft content prepared for review. Please let us know if any further adjustments are needed.
 
 Best regards,
 Ramesh R.
