@@ -14,7 +14,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 # Securely load Gemini API Key
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# Automatically generate credentials.json on the fly
+# Automatically generate credentials.json on the fly for cloud OAuth client setup
 if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets:
     creds_dict = dict(st.secrets['GOOGLE_CREDENTIALS'])
     full_creds = {
@@ -31,24 +31,28 @@ if not os.path.exists('credentials.json') and 'GOOGLE_CREDENTIALS' in st.secrets
     with open('credentials.json', 'w') as f:
         json.dump(full_creds, f)
 
-# Automatically generate token.json on the fly for cloud authentication
-if not os.path.exists('token.json') and 'GMAIL_TOKEN' in st.secrets:
-    token_dict = dict(st.secrets['GMAIL_TOKEN'])
-    with open('token.json', 'w') as f:
-        json.dump(token_dict, f)
-
 def get_gmail_service():
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    try:
+        if 'GMAIL_TOKEN' in st.secrets:
+            # Load credentials directly from Streamlit Secrets dictionary (bulletproof)
+            token_info = dict(st.secrets['GMAIL_TOKEN'])
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+    except Exception as e:
+        st.error(f"Error loading token from secrets: {e}")
+        return None
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                st.error(f"Failed to refresh authentication token: {e}")
+                return None
         else:
-            st.error("Authentication token is missing or invalid. Please check your Streamlit Secrets.")
+            st.error("Authentication token is missing or invalid. Please check your Streamlit Secrets configuration.")
             return None
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            
     return build('gmail', 'v1', credentials=creds)
 
 def analyze_email_with_gemini(subject, sender, snippet):
